@@ -1,0 +1,6 @@
+playwright
+pandas
+requests
+beautifulsoup4
+anthropic
+python-dotenv
