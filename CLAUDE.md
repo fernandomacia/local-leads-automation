@@ -159,7 +159,7 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
 
 ## Project Phases
 
-- [ ] Phase 0: Basic Maps scraper prototype
+- [x] Phase 0: Basic Maps scraper prototype
 - [ ] Phase 1: Robust Maps scraper with scroll, more fields, rate limiting
 - [ ] Phase 2: Web analyzer (WordPress detection, email/IG extraction, SEO score)
 - [ ] Phase 3: Message generation with Claude API

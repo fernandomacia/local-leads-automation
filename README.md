@@ -84,7 +84,7 @@ config.py                    # Queries, limits, general configuration
 
 ## Development Phases
 
-- [ ] **Phase 0** — Basic prototype: extracts name and website from Google Maps
+- [x] **Phase 0** — Basic prototype: extracts name and website from Google Maps
 - [ ] **Phase 1** — Robust Maps scraper: scroll, more fields, rate limiting
 - [ ] **Phase 2** — Web analyzer: WordPress detection, email/Instagram, SEO score
 - [ ] **Phase 3** — Message generation with Claude API
