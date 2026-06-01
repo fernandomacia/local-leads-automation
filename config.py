@@ -1,6 +1,6 @@
 DEFAULT_PROFESSION = "abogados"
-DEFAULT_CITY = "Elche"
-HEADLESS = False
+DEFAULT_CITY = "Crevillent"
+HEADLESS = True
 
 # Rate limiting & scroll params
 DELAY_INITIAL_LOAD = 3.0
