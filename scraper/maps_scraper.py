@@ -1,4 +1,5 @@
 import random
+import re
 import time
 from urllib.parse import quote_plus
 from playwright.sync_api import sync_playwright, Page
@@ -36,10 +37,10 @@ def _handle_consent(page: Page) -> None:
 
 
 def _collect_hrefs(page: Page) -> list[str]:
-    """Phase 1: Scroll the results list and collect all business URLs without clicking.
+    """Scroll the results list and collect all business URLs without clicking.
 
-    Scrolling div[role=main] only works reliably while the list is active (no card open).
-    Returns a deduplicated ordered list of place URLs.
+    Uses div[role="feed"] as the scroll target — only reliable while no card panel is open.
+    Returns a deduplicated list of place URLs.
     """
     seen: set[str] = set()
     no_new_count = 0
@@ -68,12 +69,45 @@ def _collect_hrefs(page: Page) -> list[str]:
     return list(seen)
 
 
-def _extract_business(page: Page) -> dict:
-    """Extract name and website from an open business page."""
+def _extract_business(page: Page, default_city: str = "") -> dict:
+    """Extract business info from an open Google Maps place page."""
     name = page.locator("h1.DUwDvf").inner_text()
+
     authority = page.locator('a[data-item-id="authority"]')
     website = authority.first.get_attribute("href") if authority.count() > 0 else ""
-    return {"name": name, "website": website or ""}
+
+    phone_el = page.locator('a[href^="tel:"]')
+    phone = phone_el.first.get_attribute("href").replace("tel:", "") if phone_el.count() > 0 else ""
+
+    address_el = page.locator('button[data-item-id="address"]')
+    raw = address_el.first.inner_text() if address_el.count() > 0 else ""
+    # Strip leading icon characters (Google Maps private-use Unicode) and whitespace
+    full_address = re.sub(r'^[^\w]+', '', raw).strip()
+
+    # Parse structured location fields from "Street, CP City, Province" format
+    location_match = re.search(r'\b\d{5}\b\s+([^,]+),\s*([^,]+)', full_address)
+    if location_match:
+        zip_code = re.search(r'\b\d{5}\b', full_address).group()
+        city = location_match.group(1).strip()
+        province = location_match.group(2).strip()
+    else:
+        zip_code = ""
+        city = f"**{default_city}**" if default_city else ""
+        province = ""
+
+    # Keep only the street part (everything before the zip code)
+    street_match = re.match(r'^(.+?),?\s*\b\d{5}\b', full_address)
+    address = street_match.group(1).strip().rstrip(",").strip() if street_match else full_address
+
+    return {
+        "name": name,
+        "website": website or "",
+        "phone": phone,
+        "address": address,
+        "zip_code": zip_code,
+        "city": city,
+        "province": province,
+    }
 
 
 def scrape(profession: str, city: str, headless: bool = False) -> list[dict]:
@@ -85,7 +119,7 @@ def scrape(profession: str, city: str, headless: bool = False) -> list[dict]:
         headless: Run browser without UI.
 
     Returns:
-        List of dicts with keys: name, website.
+        List of dicts with keys: name, website, phone, address, zip_code, city, province.
     """
     search_url = f"https://www.google.com/maps/search/{quote_plus(f'{profession} {city}')}"
 
@@ -110,7 +144,7 @@ def scrape(profession: str, city: str, headless: bool = False) -> list[dict]:
                     page.goto(href)
                     page.wait_for_selector("h1.DUwDvf", timeout=10000)
                     time.sleep(_get_delay(DELAY_PER_CARD_CLICK))
-                    lead = _extract_business(page)
+                    lead = _extract_business(page, city)
                     print(f"  [{i + 1}/{len(hrefs)}] {lead['name']}")
                     leads.append(lead)
                     break
