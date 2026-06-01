@@ -1,6 +1,7 @@
 playwright
 pandas
 requests
+urllib3
 beautifulsoup4
 anthropic
 python-dotenv
