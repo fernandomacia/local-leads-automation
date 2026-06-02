@@ -94,19 +94,62 @@ def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
     return found
 
 
+def _url_exists(url: str) -> bool:
+    try:
+        resp = requests.head(url, timeout=5, headers=HEADERS, allow_redirects=True, verify=False)
+        return resp.status_code < 400
+    except Exception:
+        return False
+
+
 def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
     issues = []
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Security
     if not url.startswith("https://"):
         issues.append("no_https")
+
+    # On-page SEO
     if not soup.find("title"):
         issues.append("no_title")
     if not soup.find("meta", attrs={"name": "description"}):
         issues.append("no_meta_description")
-    if not soup.find("h1"):
+    h1_tags = soup.find_all("h1")
+    if not h1_tags:
         issues.append("no_h1")
+    elif len(h1_tags) > 1:
+        issues.append("multiple_h1")
     if not soup.find("meta", attrs={"name": "viewport"}):
         issues.append("no_viewport")
-    return max(0, 100 - len(issues) * 20), issues
+    if not soup.find("link", attrs={"rel": "canonical"}):
+        issues.append("no_canonical")
+    if not (soup.find("html") and soup.find("html").get("lang")):
+        issues.append("no_lang")
+    if not soup.find("meta", attrs={"property": "og:title"}):
+        issues.append("no_og_tags")
+    if not soup.find("script", attrs={"type": "application/ld+json"}):
+        issues.append("no_structured_data")
+    if any(img for img in soup.find_all("img") if not img.get("alt")):
+        issues.append("no_alt_images")
+
+    # Analytics — check for GA4, GTM, Universal Analytics
+    html_str = str(soup)
+    if not any(s in html_str for s in ("gtag(", "googletagmanager.com", "google-analytics.com", "_gaq")):
+        issues.append("no_analytics")
+
+    # Favicon
+    if not soup.find("link", rel=lambda r: isinstance(r, list) and "icon" in r or r == "icon"):
+        issues.append("no_favicon")
+
+    # Crawlability (one extra HEAD request each)
+    if not _url_exists(f"{base_url}/sitemap.xml"):
+        issues.append("no_sitemap")
+    if not _url_exists(f"{base_url}/robots.txt"):
+        issues.append("no_robots")
+
+    return max(0, 100 - len(issues) * 10), issues
 
 
 _EMPTY: dict = {
