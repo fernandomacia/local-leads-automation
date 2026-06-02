@@ -21,13 +21,13 @@ Google Maps → extract businesses
 ```
 main.py                      # Pipeline orchestrator
 scraper/
-  maps_scraper.py            # Extracts name, website, phone from Google Maps
-  web_analyzer.py            # Detects WordPress, extracts email/IG, scores issues
+  maps_scraper.py            # Extracts name, website, phone, address from Google Maps
+  web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring
 ai/
-  message_generator.py       # Generates personalized message via Claude API
+  message_generator.py       # Generates personalized outreach emails via local LLM
 data/
-  leads.csv                  # Main output
-config.py                    # Constants and configuration (queries, limits, API keys)
+  leads.csv                  # Single output: all fields from all phases
+config.py                    # Constants and configuration (queries, LLM, sender identity)
 ```
 
 ## Tech Stack
@@ -36,8 +36,8 @@ config.py                    # Constants and configuration (queries, limits, API
 - **Playwright** — Google Maps scraping (real browser to avoid blocks)
 - **requests + BeautifulSoup** — lead website analysis
 - **pandas** — CSV lead management
-- **Anthropic SDK** — message generation with Claude
-- **python-dotenv** — secrets management (API keys)
+- **transformers + bitsandbytes** — local LLM inference (Qwen2.5-7B, 4-bit quantized)
+- **python-dotenv** — secrets management (future API keys)
 
 ---
 
@@ -100,13 +100,13 @@ def analyze_website(url: str) -> dict:
 
 ### Work Sessions
 - Build in phases: make it work first, then polish
-- Current phase: **Google Maps scraper**
+- Current phase: **Phase 3 complete — preparing Phase 4 (CLI)**
 - At the end of each phase, update this file with lessons learned
 
 ### Scraping
 - Use `time.sleep()` with realistic values (3–6s between actions), never less
-- `headless=False` by default for debugging; switch to `True` only when stable
-- Do not run more than 20–30 results in tests to avoid triggering flags
+- `HEADLESS = True` in `config.py`; set to `False` only for debugging
+- Pass `max_results=N` to `scrape()` to limit results during testing
 
 ### Outreach
 - Final sending is semi-manual (not mass automated) to comply with GDPR
@@ -160,7 +160,7 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
 ## Project Phases
 
 - [x] Phase 0: Basic Maps scraper prototype
-- [ ] Phase 1: Robust Maps scraper with scroll, more fields, rate limiting
-- [ ] Phase 2: Web analyzer (WordPress detection, email/IG extraction, SEO score)
-- [ ] Phase 3: Message generation with Claude API
-- [ ] Phase 4: CLI to run the full pipeline
+- [x] Phase 1: Robust Maps scraper with scroll, more fields, rate limiting
+- [x] Phase 2: Web analyzer (CMS detection, email/socials extraction, SEO scoring)
+- [x] Phase 3: Message generation with local LLM (Qwen2.5-7B, 4-bit), full pipeline
+- [ ] Phase 4: CLI to run the full pipeline with options (--phase, --city, --profession)
