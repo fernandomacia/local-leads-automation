@@ -5,3 +5,8 @@ urllib3
 beautifulsoup4
 anthropic
 python-dotenv
+# AI / local LLM — install torch separately with CUDA support:
+# pip install torch --index-url https://download.pytorch.org/whl/cu128
+transformers
+accelerate
+bitsandbytes
