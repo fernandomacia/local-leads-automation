@@ -36,11 +36,11 @@ def _handle_consent(page: Page) -> None:
     time.sleep(_get_delay(DELAY_AFTER_CONSENT))
 
 
-def _collect_hrefs(page: Page) -> list[str]:
-    """Scroll the results list and collect all business URLs without clicking.
+def _collect_hrefs(page: Page, max_results: int | None = None) -> list[str]:
+    """Scroll the results list and collect business URLs without clicking.
 
     Uses div[role="feed"] as the scroll target — only reliable while no card panel is open.
-    Returns a deduplicated list of place URLs.
+    Returns a deduplicated list of place URLs, capped at max_results if provided.
     """
     seen: set[str] = set()
     no_new_count = 0
@@ -52,6 +52,9 @@ def _collect_hrefs(page: Page) -> list[str]:
         ]
         new = [h for h in current_hrefs if h not in seen]
         seen.update(new)
+
+        if max_results and len(seen) >= max_results:
+            break
 
         page.evaluate("""
             const feed = document.querySelector('div[role="feed"]');
@@ -66,7 +69,8 @@ def _collect_hrefs(page: Page) -> list[str]:
             if no_new_count >= 3:
                 break
 
-    return list(seen)
+    hrefs = list(seen)
+    return hrefs[:max_results] if max_results else hrefs
 
 
 def _extract_business(page: Page, default_city: str = "") -> dict:
@@ -110,13 +114,14 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
     }
 
 
-def scrape(profession: str, city: str, headless: bool = False) -> list[dict]:
-    """Scrape all business listings from Google Maps for a profession in a city.
+def scrape(profession: str, city: str, headless: bool = False, max_results: int | None = None) -> list[dict]:
+    """Scrape business listings from Google Maps for a profession in a city.
 
     Args:
         profession: Profession to search (e.g., "abogados").
         city: City to search in (e.g., "Elche").
         headless: Run browser without UI.
+        max_results: Cap on listings to collect. None means collect all.
 
     Returns:
         List of dicts with keys: name, website, phone, address, zip_code, city, province.
@@ -133,7 +138,7 @@ def scrape(profession: str, city: str, headless: bool = False) -> list[dict]:
         page.wait_for_selector("a.hfpxzc", timeout=15000)
 
         print(f"[+] Collecting results for {profession} in {city}...")
-        hrefs = _collect_hrefs(page)
+        hrefs = _collect_hrefs(page, max_results)
         print(f"[+] Found {len(hrefs)} listings, extracting...")
 
         leads = []
