@@ -1,11 +1,18 @@
+# Scraping
 playwright
-pandas
 requests
 urllib3
 beautifulsoup4
-anthropic
+
+# Data & UI
+pandas
+streamlit
+
+# Configuration
 python-dotenv
-# AI / local LLM — install torch separately with CUDA support:
+
+# Local LLM inference
+# Install torch separately with CUDA support before the rest:
 # pip install torch --index-url https://download.pytorch.org/whl/cu128
 transformers
 accelerate
