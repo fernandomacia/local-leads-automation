@@ -1,3 +1,11 @@
+"""Website analysis for CMS detection, contact extraction, and SEO scoring.
+
+Fetches each lead's website with a standard HTTP client and inspects the HTML
+for WordPress/platform signals, email addresses, social links, and common
+on-page SEO issues. Social-only URLs (Instagram, Facebook, etc.) are detected
+early and routed out without a full fetch.
+"""
+
 import re
 import urllib3
 from urllib.parse import urljoin, urlparse
@@ -5,19 +13,12 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from config import SOCIAL_DOMAINS
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 10
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-SOCIAL_DOMAINS = {
-    "instagram": "instagram.com",
-    "facebook": "facebook.com",
-    "youtube": "youtube.com",
-    "linkedin": "linkedin.com",
-    "twitter": "twitter.com",
-    "tiktok": "tiktok.com",
-}
 
 # Ordered by specificity — first match wins
 CMS_SIGNATURES: list[tuple[str, list[str]]] = [
@@ -28,6 +29,13 @@ CMS_SIGNATURES: list[tuple[str, list[str]]] = [
     ("prestashop",  ["prestashop", "PrestaShop"]),
     ("joomla",      ["/media/jui/", "Joomla!"]),
     ("drupal",      ["Drupal.settings", "/sites/default/files/"]),
+    ("webflow",     ["data-wf-page", "webflow.com"]),
+    ("typo3",       ["typo3conf/", "typo3/"]),
+    ("jimdo",       ["jimdo.com", "jimdofree.com", "jimdosite.com"]),
+    ("blogger",     ["blogger.com", "blogspot.com"]),
+    ("magento",     ["Mage.Cookies", "/skin/frontend/", "magento"]),
+    ("webnode",     ["webnode.com", "webnode.es"]),
+    ("ghost",       ["ghost.io", "content/themes/"]),
 ]
 
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
@@ -35,7 +43,7 @@ _CONTACT_PATHS = ("/contacto", "/contact", "/contactar")
 
 
 def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
-    """Fetch URL and return (raw_html, soup). Returns None on any failure."""
+    """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure."""
     try:
         resp = requests.get(url, timeout=TIMEOUT, headers=HEADERS, allow_redirects=True, verify=False)
         resp.raise_for_status()
@@ -44,13 +52,17 @@ def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
         return None
 
 
-def _is_social_url(url: str) -> bool:
-    """Return True if the URL points directly to a social media platform."""
+def _identify_platform(url: str) -> str | None:
+    """Return the social platform name if the URL belongs to one, else ``None``."""
     host = urlparse(url).netloc.lower().removeprefix("www.")
-    return any(host == domain or host.endswith("." + domain) for domain in SOCIAL_DOMAINS.values())
+    for platform, domain in SOCIAL_DOMAINS.items():
+        if host == domain or host.endswith("." + domain):
+            return platform
+    return None
 
 
 def _detect_cms(html: str) -> str:
+    """Return the CMS name detected in the HTML, or ``'unknown'`` if none matches."""
     for cms, signatures in CMS_SIGNATURES:
         if any(sig in html for sig in signatures):
             return cms
@@ -58,17 +70,19 @@ def _detect_cms(html: str) -> str:
 
 
 def _extract_email(soup: BeautifulSoup, base_url: str) -> str:
-    # mailto link on current page
+    """Find an email address on the page, falling back to common contact sub-pages.
+
+    Priority: mailto link → regex match in page text → same checks on /contacto,
+    /contact, and /contactar.
+    """
     mailto = soup.find("a", href=re.compile(r"^mailto:", re.I))
     if mailto:
-        return mailto["href"][7:].split("?")[0].strip()
+        return mailto["href"][7:].split("?")[0].strip().lower()
 
-    # email regex in page text
     emails = _EMAIL_RE.findall(soup.get_text())
     if emails:
-        return emails[0]
+        return emails[0].lower()
 
-    # fallback: try contact pages
     for path in _CONTACT_PATHS:
         result = _fetch(urljoin(base_url, path))
         if not result:
@@ -76,15 +90,16 @@ def _extract_email(soup: BeautifulSoup, base_url: str) -> str:
         _, contact_soup = result
         mailto = contact_soup.find("a", href=re.compile(r"^mailto:", re.I))
         if mailto:
-            return mailto["href"][7:].split("?")[0].strip()
+            return mailto["href"][7:].split("?")[0].strip().lower()
         emails = _EMAIL_RE.findall(contact_soup.get_text())
         if emails:
-            return emails[0]
+            return emails[0].lower()
 
     return ""
 
 
 def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
+    """Return a dict mapping each social platform to the first matching link found."""
     found = {p: "" for p in SOCIAL_DOMAINS}
     for link in soup.find_all("a", href=True):
         href = link["href"]
@@ -103,15 +118,24 @@ def _url_exists(url: str) -> bool:
 
 
 def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
+    """Audit the page for common SEO issues and return a score and issue list.
+
+    Each issue deducts 10 points from 100. Checks cover security (HTTPS),
+    on-page tags (title, meta, h1, viewport, canonical, lang, OG, structured data,
+    alt attributes), analytics presence, favicon, and crawlability (sitemap,
+    robots.txt). The last two require one extra HEAD request each.
+
+    Returns:
+        A tuple of ``(score, issues)`` where score is clamped to ``[0, 100]``
+        and issues is a list of string keys describing each failing check.
+    """
     issues = []
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-    # Security
     if not url.startswith("https://"):
         issues.append("no_https")
 
-    # On-page SEO
     if not soup.find("title"):
         issues.append("no_title")
     if not soup.find("meta", attrs={"name": "description"}):
@@ -134,16 +158,15 @@ def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
     if any(img for img in soup.find_all("img") if not img.get("alt")):
         issues.append("no_alt_images")
 
-    # Analytics — check for GA4, GTM, Universal Analytics
+    # GA4, GTM, Universal Analytics, and legacy _gaq all count as "analytics present"
     html_str = str(soup)
     if not any(s in html_str for s in ("gtag(", "googletagmanager.com", "google-analytics.com", "_gaq")):
         issues.append("no_analytics")
 
-    # Favicon
     if not soup.find("link", rel=lambda r: isinstance(r, list) and "icon" in r or r == "icon"):
         issues.append("no_favicon")
 
-    # Crawlability (one extra HEAD request each)
+    # Each of these requires an extra HEAD request
     if not _url_exists(f"{base_url}/sitemap.xml"):
         issues.append("no_sitemap")
     if not _url_exists(f"{base_url}/robots.txt"):
@@ -152,7 +175,8 @@ def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
     return max(0, 100 - len(issues) * 10), issues
 
 
-_EMPTY: dict = {
+# Default field values for leads whose website cannot be analyzed
+_EMPTY_ANALYSIS: dict = {
     "cms": "", "email": "",
     **{p: "" for p in SOCIAL_DOMAINS},
     "seo_score": 0, "seo_issues": "",
@@ -160,21 +184,27 @@ _EMPTY: dict = {
 
 
 def analyze(lead: dict) -> dict:
-    """Fetch and analyze a lead's website, returning the lead enriched with web data.
+    """Enrich a lead with CMS, contact, social, and SEO data from its website.
 
     Args:
-        lead: Dict with at least a 'website' key.
+        lead: Dict with at least a ``website`` key.
 
     Returns:
-        The lead dict extended with cms, email, social URLs, seo_score, seo_issues.
+        The lead dict extended with ``cms``, ``email``, per-platform social URLs,
+        ``seo_score``, and ``seo_issues``. Leads without a reachable website still
+        receive all keys, populated with empty/zero defaults.
     """
     url = lead.get("website", "")
-    if not url or _is_social_url(url):
-        return {**lead, **_EMPTY}
+    if not url:
+        return {**lead, **_EMPTY_ANALYSIS}
+
+    platform = _identify_platform(url)
+    if platform:
+        return {**lead, "website": "", **_EMPTY_ANALYSIS, platform: url}
 
     result = _fetch(url)
     if not result:
-        return {**lead, **_EMPTY, "cms": "unreachable"}
+        return {**lead, **_EMPTY_ANALYSIS, "cms": "unreachable"}
 
     html, soup = result
     seo_score, seo_issues = _score_seo(soup, url)

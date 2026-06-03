@@ -1,3 +1,10 @@
+"""Google Maps scraper for local business discovery.
+
+Drives a real Chromium browser via Playwright to avoid bot detection.
+The flow is: search → scroll to collect all listing URLs → visit each card
+to extract structured business data.
+"""
+
 import random
 import re
 import time
@@ -16,18 +23,17 @@ from config import (
 
 
 def _get_delay(base_delay: float) -> float:
-    """Apply jitter to delay: base ± (base * JITTER_RANGE)."""
+    """Return base_delay with ±JITTER_RANGE% random variance to mimic human timing."""
     variance = base_delay * JITTER_RANGE
     return base_delay + random.uniform(-variance, variance)
 
 
 def _exponential_backoff(attempt: int) -> float:
-    """Return delay for exponential backoff: 2, 4, 8, 16..."""
     return RETRY_BACKOFF_BASE ** attempt
 
 
 def _handle_consent(page: Page) -> None:
-    """Accept Google's EU cookie consent page if redirected."""
+    """Accept Google's EU cookie consent banner if present before Maps loads."""
     if "consent.google.com" not in page.url:
         return
     page.locator('button:has-text("Aceptar todo")').first.click()
@@ -37,10 +43,11 @@ def _handle_consent(page: Page) -> None:
 
 
 def _collect_hrefs(page: Page, max_results: int | None = None) -> list[str]:
-    """Scroll the results list and collect business URLs without clicking.
+    """Scroll the results feed and collect all business URLs without opening cards.
 
-    Uses div[role="feed"] as the scroll target — only reliable while no card panel is open.
-    Returns a deduplicated list of place URLs, capped at max_results if provided.
+    Scrolls ``div[role="feed"]`` — only reliable while no card panel is open.
+    Stops when ``max_results`` is reached or 3 consecutive scrolls yield nothing new.
+    Returns a deduplicated list capped at ``max_results``.
     """
     seen: set[str] = set()
     no_new_count = 0
@@ -74,7 +81,12 @@ def _collect_hrefs(page: Page, max_results: int | None = None) -> list[str]:
 
 
 def _extract_business(page: Page, default_city: str = "") -> dict:
-    """Extract business info from an open Google Maps place page."""
+    """Extract structured business data from an open Google Maps place page.
+
+    Address parsing targets the Spanish postal format: "Street, CP City, Province".
+    When the zip code is absent and a default_city is provided, city is stored as
+    ``**city**`` to signal that the value was inferred rather than parsed.
+    """
     name = page.locator("h1.DUwDvf").inner_text()
 
     authority = page.locator('a[data-item-id="authority"]')
@@ -85,10 +97,9 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
 
     address_el = page.locator('button[data-item-id="address"]')
     raw = address_el.first.inner_text() if address_el.count() > 0 else ""
-    # Strip leading icon characters (Google Maps private-use Unicode) and whitespace
+    # Google Maps prepends private-use Unicode characters as icons
     full_address = re.sub(r'^[^\w]+', '', raw).strip()
 
-    # Parse structured location fields from "Street, CP City, Province" format
     location_match = re.search(r'\b\d{5}\b\s+([^,]+),\s*([^,]+)', full_address)
     if location_match:
         zip_code = re.search(r'\b\d{5}\b', full_address).group()
@@ -99,12 +110,11 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
         city = f"**{default_city}**" if default_city else ""
         province = ""
 
-    # Keep only the street part (everything before the zip code)
     street_match = re.match(r'^(.+?),?\s*\b\d{5}\b', full_address)
     address = street_match.group(1).strip().rstrip(",").strip() if street_match else full_address
 
     return {
-        "name": name,
+        "lead": name,
         "website": website or "",
         "phone": phone,
         "address": address,
@@ -115,16 +125,17 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
 
 
 def scrape(profession: str, city: str, headless: bool = False, max_results: int | None = None) -> list[dict]:
-    """Scrape business listings from Google Maps for a profession in a city.
+    """Scrape business listings from Google Maps for a given profession and city.
 
     Args:
-        profession: Profession to search (e.g., "abogados").
-        city: City to search in (e.g., "Elche").
-        headless: Run browser without UI.
-        max_results: Cap on listings to collect. None means collect all.
+        profession: Search term for the type of business (e.g., ``"abogados"``).
+        city: City to search in (e.g., ``"Elche"``).
+        headless: Run the browser without a visible window.
+        max_results: Maximum number of listings to collect. ``None`` collects all.
 
     Returns:
-        List of dicts with keys: name, website, phone, address, zip_code, city, province.
+        List of dicts with keys: ``lead``, ``website``, ``phone``, ``address``,
+        ``zip_code``, ``city``, ``province``, ``maps_url``.
     """
     search_url = f"https://www.google.com/maps/search/{quote_plus(f'{profession} {city}')}"
 
@@ -150,7 +161,8 @@ def scrape(profession: str, city: str, headless: bool = False, max_results: int 
                     page.wait_for_selector("h1.DUwDvf", timeout=10000)
                     time.sleep(_get_delay(DELAY_PER_CARD_CLICK))
                     lead = _extract_business(page, city)
-                    print(f"  [{i + 1}/{len(hrefs)}] {lead['name']}")
+                    lead["maps_url"] = href
+                    print(f"  [{i + 1}/{len(hrefs)}] {lead['lead']}")
                     leads.append(lead)
                     break
                 except TimeoutError:

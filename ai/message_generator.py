@@ -1,13 +1,20 @@
+"""Personalized outreach email generation via a local quantized LLM.
+
+The model receives a structured prompt describing a lead's web presence and
+returns a JSON object with a subject line and a central paragraph. The final
+email is assembled around that paragraph using fixed intro and closing blocks.
+"""
+
 import json
 import re
 
 import torch
 from transformers import BitsAndBytesConfig, pipeline
 
-from config import LLM_MODEL, SENDER_COMPANY, SENDER_NAME
+from config import LLM_MODEL, SENDER_COMPANY, SENDER_NAME, SOCIAL_DOMAINS
 
-# Maps individual issue keys to business-impact blocks.
-# The model only ever sees the block label, never the technical issue name.
+# Each group maps a set of technical SEO issue keys to a single business-language
+# label. The model only ever sees the label — never the raw issue name.
 _ISSUE_GROUPS: dict[str, dict] = {
     "seguridad": {
         "issues": {"no_https"},
@@ -35,8 +42,6 @@ _ISSUE_GROUPS: dict[str, dict] = {
         "label": "hay detalles de imagen de marca que restan profesionalidad a la presencia online",
     },
 }
-
-_SOCIAL_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "linkedin.com", "tiktok.com", "youtube.com")
 
 SYSTEM_PROMPT = f"""Eres {SENDER_NAME}, especialista en diseño web y SEO en {SENDER_COMPANY}.
 Redactas el párrafo central de emails a negocios locales describiendo los problemas detectados en su presencia online.
@@ -70,6 +75,11 @@ _SIGNATURE = f"\n\nAtentamente,\n{SENDER_NAME}\n{SENDER_COMPANY}"
 
 _SIGNATURE_PATTERNS = ("atentamente,", "saludos,", "un saludo,", "cordialmente,")
 
+_FALLBACK_MIDDLE = (
+    "Hemos detectado en su web algunas áreas de mejora que podrían estar "
+    "afectando a su imagen y visibilidad ante sus clientes potenciales."
+)
+
 
 def _strip_signature(text: str) -> str:
     """Remove any LLM-generated signature block from the middle paragraph."""
@@ -82,19 +92,18 @@ def _strip_signature(text: str) -> str:
 
 
 def _active_groups(seo_issues: str) -> list[str]:
-    """Return business-language descriptions for groups with at least one active issue."""
+    """Return business-language labels for issue groups with at least one active issue."""
     active = set(seo_issues.split("|")) if seo_issues else set()
     return [data["label"] for data in _ISSUE_GROUPS.values() if active & data["issues"]]
 
 
 def _build_prompt(lead: dict) -> str:
-    """Build the user prompt describing the lead's situation."""
-    name = lead.get("name", "")
+    name = lead.get("lead", "")
     city = lead.get("city", "").replace("*", "").strip()
     website = lead.get("website", "")
     cms = lead.get("cms", "")
     groups = _active_groups(lead.get("seo_issues", ""))
-    is_social = any(d in website for d in _SOCIAL_DOMAINS)
+    is_social = any(d in website for d in SOCIAL_DOMAINS.values())
 
     lines = [f"Negocio: {name}"]
     if city:
@@ -133,7 +142,8 @@ def _build_prompt(lead: dict) -> str:
 def _escape_string_newlines(s: str) -> str:
     """Replace literal newlines inside JSON string values with \\n.
 
-    Structural whitespace between fields is left untouched so the JSON stays valid.
+    LLMs occasionally output raw newlines inside quoted strings, producing
+    invalid JSON. Structural whitespace between fields is left untouched.
     """
     result = []
     in_string = False
@@ -159,13 +169,16 @@ _pipe = None
 
 
 def _load_model():
+    """Lazy-load the quantized LLM, keeping a single instance across calls.
+
+    Uses 4-bit NF4 quantization to fit a 7B model within 8 GB of VRAM.
+    """
     global _pipe
     if _pipe is not None:
         return _pipe
 
     print(f"[+] Loading {LLM_MODEL} (first run downloads ~15GB)...")
 
-    # 4-bit quantization fits 7B model within 8GB VRAM
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_compute_dtype=torch.float16,
@@ -183,6 +196,48 @@ def _load_model():
     return _pipe
 
 
+def _assemble(name: str, middle: str) -> str:
+    """Compose the full email from its four fixed parts: greeting, intro, body, and offer."""
+    return "\n\n".join([
+        f"Estimado equipo de {name},",
+        _INTRO,
+        _strip_signature(middle),
+        _AUDIT_OFFER,
+    ]) + _SIGNATURE
+
+
+def _try_load_json(s: str) -> dict | None:
+    """Parse s as JSON, retrying after escaping literal newlines. Returns None on failure."""
+    for candidate in (s, _escape_string_newlines(s)):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _parse(raw: str) -> dict:
+    """Extract and merge all JSON objects from raw LLM output.
+
+    First pass: collects every flat ``{...}`` block via regex and merges them,
+    which handles models that split subject and body across separate objects.
+    Full-span fallback handles a single well-formed object spanning multiple lines.
+    """
+    merged: dict = {}
+    for m in re.finditer(r'\{[^{}]+\}', raw, re.DOTALL):
+        result = _try_load_json(m.group())
+        if result:
+            merged.update(result)
+    if merged:
+        return merged
+
+    start, end = raw.find("{"), raw.rfind("}") + 1
+    result = _try_load_json(raw[start:end])
+    if result:
+        return result
+    raise ValueError("No valid JSON found")
+
+
 def generate(lead: dict) -> dict:
     """Generate a personalized outreach email for a lead.
 
@@ -190,9 +245,11 @@ def generate(lead: dict) -> dict:
         lead: Enriched lead dict from web_analyzer.
 
     Returns:
-        Dict with keys: subject, body.
+        Dict with keys ``subject`` and ``body``. Falls back to a generic
+        message if the model output cannot be parsed.
     """
     pipe = _load_model()
+    name = lead.get("lead", "")
 
     output = pipe(
         [
@@ -207,57 +264,17 @@ def generate(lead: dict) -> dict:
     )
 
     text = output[0]["generated_text"].strip()
-    name = lead.get("name", "")
-
-    def _assemble(middle: str) -> str:
-        return "\n\n".join([
-            f"Estimado equipo de {name},",
-            _INTRO,
-            _strip_signature(middle),
-            _AUDIT_OFFER,
-        ]) + _SIGNATURE
-
-    def _fallback_middle() -> str:
-        return (
-            "Hemos detectado en su web algunas áreas de mejora que podrían estar "
-            "afectando a su imagen y visibilidad ante sus clientes potenciales."
-        )
-
-    def _parse(raw: str) -> dict:
-        """Merge all flat JSON objects found in raw; fall back to full-span parse."""
-        merged: dict = {}
-        for m in re.finditer(r'\{[^{}]+\}', raw, re.DOTALL):
-            blob = m.group()
-            for candidate in (blob, _escape_string_newlines(blob)):
-                try:
-                    merged.update(json.loads(candidate))
-                    break
-                except json.JSONDecodeError:
-                    pass
-        if merged:
-            return merged
-        # Full-span fallback (handles single well-formed object)
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        json_str = raw[start:end]
-        for candidate in (json_str, _escape_string_newlines(json_str)):
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError:
-                pass
-        raise ValueError("No valid JSON found")
 
     try:
         parsed = _parse(text)
         middle = parsed.get("body", "")
         if isinstance(middle, dict):
             middle = middle.get("text", middle.get("content", str(middle)))
-        middle = middle.replace("\\n", "\n").strip()
-        if not middle:
-            middle = _fallback_middle()
+        middle = middle.replace("\\n", "\n").strip() or _FALLBACK_MIDDLE
         subject = parsed.get("subject", "").strip() or f"Propuesta de mejora web para {name}"
-        return {"subject": subject, "body": _assemble(middle)}
-    except Exception:
+        return {"subject": subject, "body": _assemble(name, middle)}
+    except (ValueError, KeyError):
         return {
             "subject": f"Propuesta de mejora web para {name}",
-            "body": _assemble(_fallback_middle()),
+            "body": _assemble(name, _FALLBACK_MIDDLE),
         }
