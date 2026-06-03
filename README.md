@@ -1,4 +1,4 @@
-# local-leads-automation
+# local-leads-automation v1.0.0
 
 Lead generation tool for web developers. Extracts local businesses from Google Maps, analyzes their website quality, and generates personalized outreach emails using a local LLM.
 
@@ -14,7 +14,7 @@ Google Maps
   → analyze website (CMS, email, social networks, SEO score)
   → filter contactable leads (email, phone, or any social network)
   → generate personalized outreach email (local LLM)
-  → save to leads.csv
+  → save to data/leads.json
   → assisted manual outreach
 ```
 
@@ -23,7 +23,7 @@ Google Maps
 ## Requirements
 
 - Python 3.13+
-- NVIDIA GPU with 8GB+ VRAM (for local LLM inference, 4-bit quantized)
+- NVIDIA GPU with 8 GB+ VRAM (for local LLM inference, 4-bit quantized)
 
 ---
 
@@ -44,19 +44,40 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 # Install Playwright browser
 playwright install chromium
+
+# Configure environment variables
+cp .env.example .env
+# Edit .env with your sender identity and optional API credentials
 ```
 
 ---
 
 ## Usage
 
+### Streamlit dashboard (recommended)
+
 ```bash
-python main.py
+streamlit run app.py
 ```
 
-Edit `config.py` to set the target profession, city, and sender identity before running.
+Opens a browser UI where you can set the profession, city, and result limit, then run the full pipeline and review results in a table.
 
-Results are saved to `data/leads.csv` (single file, all phases merged).
+### Command line
+
+```bash
+python main.py --profession abogados --city Elche
+python main.py --profession abogados --city Elche --max 20
+python main.py --profession abogados --city Elche --max 20 --no-headless
+```
+
+| Flag | Description |
+|---|---|
+| `--profession` | Type of business to search (required) |
+| `--city` | City to search in (required) |
+| `--max N` | Cap on listings to collect (default: all) |
+| `--no-headless` | Open the browser visibly (for debugging) |
+
+Results are saved to `data/leads.json`.
 
 ---
 
@@ -64,8 +85,9 @@ Results are saved to `data/leads.csv` (single file, all phases merged).
 
 | Field | Source | Description |
 |---|---|---|
-| `name` | Maps | Business name |
-| `website` | Maps | Website URL |
+| `lead` | Maps | Business name |
+| `website` | Maps | Website hostname |
+| `maps_url` | Maps | Google Maps listing URL |
 | `phone` | Maps | Phone number |
 | `address` | Maps | Street address |
 | `zip_code` | Maps | Postal code |
@@ -103,15 +125,18 @@ Results are saved to `data/leads.csv` (single file, all phases merged).
 ## Project Structure
 
 ```
-main.py                      # Pipeline orchestrator
+main.py                      # Pipeline orchestrator (CLI entry point)
+app.py                       # Streamlit dashboard
 scraper/
   maps_scraper.py            # Scrapes businesses from Google Maps
   web_analyzer.py            # CMS detection, contacts, SEO scoring
 ai/
   message_generator.py       # Generates outreach emails via local LLM
+api/
+  client.py                  # Saves leads.json; optional POST to external API
 data/
-  leads.csv                  # Full pipeline output
-config.py                    # Search parameters, LLM model, sender identity
+  leads.json                 # Full pipeline output (flat JSON)
+config.py                    # Scraper, LLM, and sender configuration
 .env                         # Secrets (do not commit)
 ```
 
@@ -122,8 +147,8 @@ config.py                    # Search parameters, LLM model, sender identity
 - [x] **Phase 0** — Basic prototype: extracts name and website from Google Maps
 - [x] **Phase 1** — Robust Maps scraper: unlimited scroll, address/phone/location, rate limiting with jitter, exponential backoff
 - [x] **Phase 2** — Web analyzer: CMS detection, email extraction, social networks, SEO scoring (14 checks)
-- [x] **Phase 3** — Message generation: local LLM (Qwen2.5-7B, 4-bit), contactable lead filtering, single CSV output
-- [ ] **Phase 4** — CLI: `--phase`, `--city`, `--profession`, `--max` flags
+- [x] **Phase 3** — Message generation: local LLM (Qwen2.5-7B, 4-bit), contactable lead filtering, full pipeline
+- [x] **Phase 4** — CLI flags, Streamlit dashboard, API client, JSON output, full refactor
 
 ---
 
@@ -131,5 +156,5 @@ config.py                    # Search parameters, LLM model, sender identity
 
 - Delays are set to 3–6 seconds between scraping actions to simulate human behavior.
 - Message sending is **semi-manual** — AI-generated drafts are reviewed before sending, in compliance with GDPR.
-- The LLM runs locally (no API key required). First run downloads ~4GB of model weights.
+- The LLM runs locally (no API key required). First run downloads ~15 GB of model weights.
 - Leads without any reachable contact channel (email, phone, or social network) are skipped in Phase 3.

@@ -19,15 +19,18 @@ Google Maps → extract businesses
 ## Module Architecture
 
 ```
-main.py                      # Pipeline orchestrator
+main.py                      # Pipeline orchestrator (CLI entry point)
+app.py                       # Streamlit dashboard — launches pipeline and shows results
 scraper/
-  maps_scraper.py            # Extracts name, website, phone, address from Google Maps
+  maps_scraper.py            # Extracts lead, website, phone, address from Google Maps
   web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring
 ai/
   message_generator.py       # Generates personalized outreach emails via local LLM
+api/
+  client.py                  # Saves leads.json and optionally POSTs to external API
 data/
-  leads.csv                  # Single output: all fields from all phases
-config.py                    # Constants and configuration (queries, LLM, sender identity)
+  leads.json                 # Single output: all fields from all phases (flat JSON)
+config.py                    # Constants and configuration (scraper, LLM, sender identity)
 ```
 
 ## Tech Stack
@@ -35,9 +38,10 @@ config.py                    # Constants and configuration (queries, LLM, sender
 - **Python 3.13** with venv
 - **Playwright** — Google Maps scraping (real browser to avoid blocks)
 - **requests + BeautifulSoup** — lead website analysis
-- **pandas** — CSV lead management
+- **pandas** — data handling in the Streamlit dashboard
+- **Streamlit** — web UI for running the pipeline and reviewing results
 - **transformers + bitsandbytes** — local LLM inference (Qwen2.5-7B, 4-bit quantized)
-- **python-dotenv** — secrets management (future API keys)
+- **python-dotenv** — environment variable management (`.env`)
 
 ---
 
@@ -100,7 +104,7 @@ def analyze_website(url: str) -> dict:
 
 ### Work Sessions
 - Build in phases: make it work first, then polish
-- Current phase: **Phase 3 complete — preparing Phase 4 (CLI)**
+- Current phase: **Phase 4 complete — CLI + Streamlit dashboard shipped; preparing Phase 5**
 - At the end of each phase, update this file with lessons learned
 
 ### Scraping
@@ -163,4 +167,4 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
 - [x] Phase 1: Robust Maps scraper with scroll, more fields, rate limiting
 - [x] Phase 2: Web analyzer (CMS detection, email/socials extraction, SEO scoring)
 - [x] Phase 3: Message generation with local LLM (Qwen2.5-7B, 4-bit), full pipeline
-- [ ] Phase 4: CLI to run the full pipeline with options (--phase, --city, --profession)
+- [x] Phase 4: CLI (`--profession`, `--city`, `--max`, `--no-headless`) + Streamlit dashboard + API client + JSON output
