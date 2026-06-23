@@ -18,7 +18,12 @@ from config import SOCIAL_DOMAINS
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 10
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+}
 
 # Ordered by specificity — first match wins
 CMS_SIGNATURES: list[tuple[str, list[str]]] = [
@@ -42,13 +47,21 @@ _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _CONTACT_PATHS = ("/contacto", "/contact", "/contactar")
 
 
-def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
-    """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure."""
+def _fetch(url: str, *, log_failure: bool = False) -> tuple[str, BeautifulSoup] | None:
+    """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure.
+
+    Args:
+        log_failure: Print the failure reason (HTTP status, DNS error, timeout, etc.).
+            Used for the primary site fetch in ``analyze()``; contact-page probes in
+            ``_extract_email`` stay silent since 404s there are expected and frequent.
+    """
     try:
         resp = requests.get(url, timeout=TIMEOUT, headers=HEADERS, allow_redirects=True, verify=False)
         resp.raise_for_status()
         return resp.text, BeautifulSoup(resp.text, "html.parser")
-    except Exception:
+    except requests.RequestException as e:
+        if log_failure:
+            print(f"  [!] Unreachable: {url} — {e}")
         return None
 
 
@@ -113,7 +126,7 @@ def _url_exists(url: str) -> bool:
     try:
         resp = requests.head(url, timeout=5, headers=HEADERS, allow_redirects=True, verify=False)
         return resp.status_code < 400
-    except Exception:
+    except requests.RequestException:
         return False
 
 
@@ -202,7 +215,7 @@ def analyze(lead: dict) -> dict:
     if platform:
         return {**lead, "website": "", **_EMPTY_ANALYSIS, platform: url}
 
-    result = _fetch(url)
+    result = _fetch(url, log_failure=True)
     if not result:
         return {**lead, **_EMPTY_ANALYSIS, "cms": "unreachable"}
 
