@@ -10,10 +10,3 @@ streamlit
 
 # Configuration
 python-dotenv
-
-# Local LLM inference
-# Install torch separately with CUDA support before the rest:
-# pip install torch --index-url https://download.pytorch.org/whl/cu128
-transformers
-accelerate
-bitsandbytes

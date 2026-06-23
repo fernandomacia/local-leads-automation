@@ -1,6 +1,6 @@
 # local-leads-automation v1.0.0
 
-Lead generation tool for web developers. Extracts local businesses from Google Maps, analyzes their website quality, and generates personalized outreach emails using a local LLM.
+Lead generation tool for web developers. Extracts local businesses from Google Maps, analyzes their website quality, and generates personalized outreach emails using an LLM via OpenRouter.
 
 **Use case:** Find businesses with poor websites (insecure, no SEO, outdated) and contact them offering improvement services.
 
@@ -13,7 +13,7 @@ Google Maps
   → scrape businesses (name, phone, address, city, province)
   → analyze website (CMS, email, social networks, SEO score)
   → filter contactable leads (email, phone, or any social network)
-  → generate personalized outreach email (local LLM)
+  → generate personalized outreach email (OpenRouter LLM)
   → save to data/leads.json
   → assisted manual outreach
 ```
@@ -23,7 +23,7 @@ Google Maps
 ## Requirements
 
 - Python 3.13+
-- NVIDIA GPU with 8 GB+ VRAM (for local LLM inference, 4-bit quantized)
+- OpenRouter API key (for message generation)
 
 ---
 
@@ -39,15 +39,12 @@ source .venv/bin/activate       # Linux/macOS
 
 pip install -r requirements.txt
 
-# Install PyTorch with CUDA support (adjust cu128 to your CUDA version)
-pip install torch --index-url https://download.pytorch.org/whl/cu128
-
 # Install Playwright browser
 playwright install chromium
 
 # Configure environment variables
 cp .env.example .env
-# Edit .env with your sender identity and optional API credentials
+# Edit .env with your OpenRouter API key, sender identity, and optional API credentials
 ```
 
 ---
@@ -131,12 +128,12 @@ scraper/
   maps_scraper.py            # Scrapes businesses from Google Maps
   web_analyzer.py            # CMS detection, contacts, SEO scoring
 ai/
-  message_generator.py       # Generates outreach emails via local LLM
+  message_generator.py       # Generates outreach emails via OpenRouter
 api/
   client.py                  # Saves leads.json; optional POST to external API
 data/
   leads.json                 # Full pipeline output (flat JSON)
-config.py                    # Scraper, LLM, and sender configuration
+config.py                    # Scraper, OpenRouter, and sender configuration
 .env                         # Secrets (do not commit)
 ```
 
@@ -147,7 +144,7 @@ config.py                    # Scraper, LLM, and sender configuration
 - [x] **Phase 0** — Basic prototype: extracts name and website from Google Maps
 - [x] **Phase 1** — Robust Maps scraper: unlimited scroll, address/phone/location, rate limiting with jitter, exponential backoff
 - [x] **Phase 2** — Web analyzer: CMS detection, email extraction, social networks, SEO scoring (14 checks)
-- [x] **Phase 3** — Message generation: local LLM (Qwen2.5-7B, 4-bit), contactable lead filtering, full pipeline
+- [x] **Phase 3** — Message generation: OpenRouter LLM (DeepSeek), contactable lead filtering, full pipeline
 - [x] **Phase 4** — CLI flags, Streamlit dashboard, API client, JSON output, full refactor
 
 ---
@@ -156,5 +153,5 @@ config.py                    # Scraper, LLM, and sender configuration
 
 - Delays are set to 3–6 seconds between scraping actions to simulate human behavior.
 - Message sending is **semi-manual** — AI-generated drafts are reviewed before sending, in compliance with GDPR.
-- The LLM runs locally (no API key required). First run downloads ~15 GB of model weights.
+- Message generation calls the OpenRouter API (`OPENROUTER_API_KEY` required in `.env`).
 - Leads without any reachable contact channel (email, phone, or social network) are skipped in Phase 3.

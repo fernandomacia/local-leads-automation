@@ -1,4 +1,4 @@
-"""Personalized outreach email generation via a local quantized LLM.
+"""Personalized outreach email generation via the OpenRouter API.
 
 The model receives a structured prompt describing a lead's web presence and
 returns a JSON object with a subject line and a central paragraph. The final
@@ -8,10 +8,11 @@ email is assembled around that paragraph using fixed intro and closing blocks.
 import json
 import re
 
-import torch
-from transformers import BitsAndBytesConfig, pipeline
+import requests
 
-from config import LLM_MODEL, SENDER_COMPANY, SENDER_NAME, SOCIAL_DOMAINS
+from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, SENDER_COMPANY, SENDER_NAME, SOCIAL_DOMAINS
+
+_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Each group maps a set of technical SEO issue keys to a single business-language
 # label. The model only ever sees the label — never the raw issue name.
@@ -165,35 +166,24 @@ def _escape_string_newlines(s: str) -> str:
     return "".join(result)
 
 
-_pipe = None
-
-
-def _load_model():
-    """Lazy-load the quantized LLM, keeping a single instance across calls.
-
-    Uses 4-bit NF4 quantization to fit a 7B model within 8 GB of VRAM.
-    """
-    global _pipe
-    if _pipe is not None:
-        return _pipe
-
-    print(f"[+] Loading {LLM_MODEL} (first run downloads ~15GB)...")
-
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-    )
-
-    _pipe = pipeline(
-        "text-generation",
-        model=LLM_MODEL,
-        model_kwargs={"quantization_config": bnb_config},
-        device_map="auto",
-    )
-    print("[+] Model ready.")
-    return _pipe
+def _complete(system_prompt: str, user_prompt: str) -> str:
+    """Send a chat completion request to OpenRouter and return the raw text."""
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.5,
+    }
+    resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
 def _assemble(name: str, middle: str) -> str:
@@ -248,22 +238,8 @@ def generate(lead: dict) -> dict:
         Dict with keys ``subject`` and ``body``. Falls back to a generic
         message if the model output cannot be parsed.
     """
-    pipe = _load_model()
     name = lead.get("lead", "")
-
-    output = pipe(
-        [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_prompt(lead)},
-        ],
-        max_new_tokens=200,
-        temperature=0.5,
-        do_sample=True,
-        pad_token_id=pipe.tokenizer.eos_token_id,
-        return_full_text=False,
-    )
-
-    text = output[0]["generated_text"].strip()
+    text = _complete(SYSTEM_PROMPT, _build_prompt(lead))
 
     try:
         parsed = _parse(text)

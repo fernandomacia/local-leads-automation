@@ -25,12 +25,12 @@ scraper/
   maps_scraper.py            # Extracts lead, website, phone, address from Google Maps
   web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring
 ai/
-  message_generator.py       # Generates personalized outreach emails via local LLM
+  message_generator.py       # Generates personalized outreach emails via OpenRouter API
 api/
   client.py                  # Saves leads.json and optionally POSTs to external API
 data/
   leads.json                 # Single output: all fields from all phases (flat JSON)
-config.py                    # Constants and configuration (scraper, LLM, sender identity)
+config.py                    # Constants and configuration (scraper, OpenRouter, sender identity)
 ```
 
 ## Tech Stack
@@ -40,7 +40,7 @@ config.py                    # Constants and configuration (scraper, LLM, sender
 - **requests + BeautifulSoup** — lead website analysis
 - **pandas** — data handling in the Streamlit dashboard
 - **Streamlit** — web UI for running the pipeline and reviewing results
-- **transformers + bitsandbytes** — local LLM inference (Qwen2.5-7B, 4-bit quantized)
+- **requests + OpenRouter API** — message generation via DeepSeek (`deepseek/deepseek-chat`)
 - **python-dotenv** — environment variable management (`.env`)
 
 ---
@@ -167,4 +167,5 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
 - [x] Phase 1: Robust Maps scraper with scroll, more fields, rate limiting
 - [x] Phase 2: Web analyzer (CMS detection, email/socials extraction, SEO scoring)
 - [x] Phase 3: Message generation with local LLM (Qwen2.5-7B, 4-bit), full pipeline
+- [x] Phase 4.1: Switched message generation from local LLM to OpenRouter API (DeepSeek)
 - [x] Phase 4: CLI (`--profession`, `--city`, `--max`, `--no-headless`) + Streamlit dashboard + API client + JSON output

@@ -43,4 +43,5 @@ MAX_EXTRACTION_RETRIES = 3
 
 SENDER_NAME = os.getenv("SENDER_NAME")
 SENDER_COMPANY = os.getenv("SENDER_COMPANY")
-LLM_MODEL = os.getenv("LLM_MODEL")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")
