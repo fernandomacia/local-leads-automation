@@ -1,8 +1,7 @@
-"""Personalized outreach email generation via the OpenRouter API.
+"""Personalized outreach email and phone script generation via the OpenRouter API.
 
-The model receives a structured prompt describing a lead's web presence and
-returns a JSON object with a subject line and a central paragraph. The final
-email is assembled around that paragraph using fixed intro and closing blocks.
+The model receives raw structured data about a lead's web presence and returns
+a JSON object with a complete email (subject + body) and a phone argumentario.
 """
 
 import json
@@ -10,141 +9,61 @@ import re
 
 import requests
 
-from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, SENDER_COMPANY, SENDER_NAME, SOCIAL_DOMAINS
+from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, SENDER_COMPANY, SOCIAL_DOMAINS
+
+if not SENDER_COMPANY:
+    raise EnvironmentError("SENDER_COMPANY must be set in .env")
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Each group maps a set of technical SEO issue keys to a single business-language
-# label. The model only ever sees the label — never the raw issue name.
-_ISSUE_GROUPS: dict[str, dict] = {
-    "seguridad": {
-        "issues": {"no_https"},
-        "label": "la web presenta vulnerabilidades de seguridad que pueden generar desconfianza en sus visitantes",
-    },
-    "posicionamiento": {
-        "issues": {"no_title", "no_meta_description", "no_h1", "multiple_h1",
-                   "no_canonical", "no_structured_data", "no_sitemap", "no_robots"},
-        "label": "el posicionamiento en Google está limitado por carencias técnicas no visibles a simple vista",
-    },
-    "adaptacion_movil": {
-        "issues": {"no_viewport", "no_alt_images", "no_lang"},
-        "label": "la web no está completamente adaptada para móviles ni cumple criterios de accesibilidad",
-    },
-    "redes_sociales": {
-        "issues": {"no_og_tags"},
-        "label": "el contenido no está preparado para compartirse correctamente en redes sociales",
-    },
-    "analitica": {
-        "issues": {"no_analytics"},
-        "label": "no dispone de herramientas para medir las visitas ni el comportamiento de sus clientes",
-    },
-    "imagen": {
-        "issues": {"no_favicon"},
-        "label": "hay detalles de imagen de marca que restan profesionalidad a la presencia online",
-    },
-}
+SYSTEM_PROMPT = f"""Eres un agente comercial de {SENDER_COMPANY}, empresa especializada en diseño web y SEO para negocios locales.
+Tu tarea es generar dos materiales de venta personalizados para un negocio local: un email completo y un argumentario telefónico.
 
-SYSTEM_PROMPT = f"""Eres {SENDER_NAME}, especialista en diseño web y SEO en {SENDER_COMPANY}.
-Redactas el párrafo central de emails a negocios locales describiendo los problemas detectados en su presencia online.
+Recibirás datos técnicos sobre la web del negocio. Transforma esa información en argumentos de negocio concretos: pérdida de visibilidad, falta de credibilidad o clientes potenciales que no llegan. Nunca menciones tecnicismos directamente, solo sus consecuencias reales para el negocio.
 
-Normas estrictas:
-- SIEMPRE tratamiento de usted: "le", "su", "usted", "les"
-- Escribe SOLO un párrafo de 2-4 frases describiendo los problemas y su impacto en el negocio
-- Usa lenguaje de negocio; NUNCA menciones tecnicismos, soluciones ni recomendaciones — solo describe las consecuencias
-- No inventes problemas que no se te hayan indicado
-- El campo "body" NUNCA puede estar vacío; escribe siempre al menos 2 frases aunque solo haya un problema
-- Sin emojis, sin exclamaciones, sin frases hechas vacías
+NORMAS DEL EMAIL:
+- Tratamiento de usted en todo momento
+- Estructura completa: saludo personalizado al equipo del negocio, presentación de {SENDER_COMPANY} como empresa especializada en diseño web y SEO, descripción de los problemas detectados y su impacto en el negocio, propuesta de auditoría gratuita y sin compromiso, despedida cordial, firma con el texto literal [NOMBRE] (sin modificarlo) seguido del nombre de la empresa {SENDER_COMPANY}
+- El emisor es un representante de la empresa, no un especialista técnico personal
+- Tono profesional pero cercano; directo, sin rodeos ni frases hechas
+- Sin emojis, sin exclamaciones
+- Máximo 250 palabras
+
+NORMAS DEL ARGUMENTARIO:
+- Estructurado en fases claramente etiquetadas: Apertura, Identificación del problema, Impacto en el negocio, Propuesta, Objeciones
+- Frases cortas y directas, listas para leer en voz alta
+- Al menos 2 objeciones frecuentes con su respuesta concisa
+- Sin emojis, sin exclamaciones
 
 Responde ÚNICAMENTE con JSON válido, sin texto adicional:
-{{"subject": "asunto del email (máx. 60 caracteres, sin signos de exclamación)", "body": "párrafo central con 2-4 frases"}}"""
-
-_INTRO = (
-    f"Me pongo en contacto con usted desde {SENDER_COMPANY}, "
-    f"especialistas en diseño web y posicionamiento SEO para negocios locales. "
-    f"Tras analizar la presencia online de su empresa, he identificado algunas áreas "
-    f"que podrían estar limitando su visibilidad y credibilidad en Internet."
-)
-
-_AUDIT_OFFER = (
-    f"Por ello, me gustaría ofrecerle una auditoría web y SEO completamente gratuita "
-    f"y sin compromiso. Analizaremos su presencia online al detalle y le presentaremos "
-    f"un informe personalizado con todas las oportunidades de mejora detectadas, "
-    f"sin ninguna obligación por su parte."
-)
-
-_SIGNATURE = f"\n\nAtentamente,\n{SENDER_NAME}\n{SENDER_COMPANY}"
-
-_SIGNATURE_PATTERNS = ("atentamente,", "saludos,", "un saludo,", "cordialmente,")
-
-_FALLBACK_MIDDLE = (
-    "Hemos detectado en su web algunas áreas de mejora que podrían estar "
-    "afectando a su imagen y visibilidad ante sus clientes potenciales."
-)
-
-
-def _strip_signature(text: str) -> str:
-    """Remove any LLM-generated signature block from the middle paragraph."""
-    lines = text.rstrip().splitlines()
-    while lines and any(lines[-1].lower().strip().startswith(p) for p in _SIGNATURE_PATTERNS):
-        lines.pop()
-    while lines and (SENDER_NAME in lines[-1] or SENDER_COMPANY in lines[-1]):
-        lines.pop()
-    return "\n".join(lines).strip()
-
-
-def _active_groups(seo_issues: str) -> list[str]:
-    """Return business-language labels for issue groups with at least one active issue."""
-    active = set(seo_issues.split("|")) if seo_issues else set()
-    return [data["label"] for data in _ISSUE_GROUPS.values() if active & data["issues"]]
+{{"subject": "asunto del email (máx. 60 caracteres, sin signos de exclamación)", "body": "email completo listo para enviar", "phone_script": "argumentario estructurado para la llamada"}}"""
 
 
 def _build_prompt(lead: dict) -> str:
-    name = lead.get("lead", "")
-    city = lead.get("city", "").replace("*", "").strip()
-    website = lead.get("website", "")
-    cms = lead.get("cms", "")
-    groups = _active_groups(lead.get("seo_issues", ""))
-    is_social = any(d in website for d in SOCIAL_DOMAINS.values())
+    social = {k: lead[k] for k in SOCIAL_DOMAINS if lead.get(k)}
+    seo_issues = lead.get("seo_issues") or {}
+    issues = list(seo_issues.values()) if isinstance(seo_issues, dict) else []
 
-    lines = [f"Negocio: {name}"]
-    if city:
-        lines.append(f"Ciudad: {city}")
+    data = {
+        "negocio": lead.get("lead", ""),
+        "ciudad": lead.get("city", "") or "",
+        "profesion": lead.get("profession", "") or "",
+        "web": lead.get("website", "") or "sin web propia",
+        "cms": lead.get("cms", "") or "desconocido",
+        "puntuacion_seo": lead.get("seo_score"),
+        "problemas_detectados": issues,
+        "email_contacto": lead.get("email", "") or "",
+        "redes_sociales": social,
+    }
 
-    if not website or is_social:
-        lines.append("Situación: no dispone de página web propia (solo redes sociales o sin presencia online)")
-        lines.append("Propuesta: diseño y desarrollo web desde cero")
-    elif cms == "unreachable":
-        lines.append(f"Web: {website}")
-        lines.append("Situación: la web existe pero presenta errores de carga o acceso")
-    elif cms == "wordpress":
-        lines.append(f"Web: {website} (WordPress)")
-        if groups:
-            lines.append("Áreas con problemas detectados:")
-            lines.extend(f"  - {g}" for g in groups)
-        else:
-            lines.append("La web no presenta problemas detectables, pero usa una plantilla genérica sin identidad de marca propia")
-    elif cms in ("wix", "squarespace", "shopify"):
-        lines.append(f"Web: {website} (plataforma {cms.capitalize()})")
-        lines.append("Situación: las plataformas de este tipo limitan el SEO y la personalización frente a una web propia")
-        if groups:
-            lines.append("Problemas adicionales detectados:")
-            lines.extend(f"  - {g}" for g in groups)
-    else:
-        lines.append(f"Web: {website}")
-        if groups:
-            lines.append("Áreas con problemas detectados:")
-            lines.extend(f"  - {g}" for g in groups)
-        else:
-            lines.append("La web no presenta problemas detectables, aunque tiene margen de mejora en diseño y posicionamiento")
-
-    return "\n".join(lines)
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
 def _escape_string_newlines(s: str) -> str:
     """Replace literal newlines inside JSON string values with \\n.
 
-    LLMs occasionally output raw newlines inside quoted strings, producing
-    invalid JSON. Structural whitespace between fields is left untouched.
+    LLMs occasionally output raw newlines inside quoted strings, producing invalid JSON.
+    Structural whitespace between fields is left untouched.
     """
     result = []
     in_string = False
@@ -166,7 +85,7 @@ def _escape_string_newlines(s: str) -> str:
     return "".join(result)
 
 
-def _complete(system_prompt: str, user_prompt: str) -> str:
+def _complete(user_prompt: str) -> str:
     """Send a chat completion request to OpenRouter and return the raw text."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -175,25 +94,21 @@ def _complete(system_prompt: str, user_prompt: str) -> str:
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": 200,
-        "temperature": 0.5,
+        "max_tokens": 1500,
+        "temperature": 0.6,
+        "response_format": {"type": "json_object"},
     }
-    resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=60)
+    resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=(5, 90))
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
-
-
-def _assemble(name: str, middle: str) -> str:
-    """Compose the full email from its four fixed parts: greeting, intro, body, and offer."""
-    return "\n\n".join([
-        f"Estimado equipo de {name},",
-        _INTRO,
-        _strip_signature(middle),
-        _AUDIT_OFFER,
-    ]) + _SIGNATURE
+    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    # Strip markdown code fences — some models add them despite json_object mode
+    if raw.startswith("```"):
+        raw = re.sub(r'^```[a-z]*\n?', '', raw)
+        raw = re.sub(r'\n?```$', '', raw.rstrip()).strip()
+    return raw
 
 
 def _try_load_json(s: str) -> dict | None:
@@ -206,51 +121,66 @@ def _try_load_json(s: str) -> dict | None:
     return None
 
 
+def _dict_to_text(d: dict) -> str:
+    """Flatten a structured dict (phase label → content) into readable plain text."""
+    lines = []
+    for section, content in d.items():
+        lines.append(f"--- {section} ---")
+        if isinstance(content, dict):
+            for k, v in content.items():
+                lines.append(f"· {k}: {v}")
+        else:
+            lines.append(str(content))
+    return "\n\n".join(lines)
+
+
 def _parse(raw: str) -> dict:
-    """Extract and merge all JSON objects from raw LLM output.
+    """Extract the JSON object from raw LLM output.
 
-    First pass: collects every flat ``{...}`` block via regex and merges them,
-    which handles models that split subject and body across separate objects.
-    Full-span fallback handles a single well-formed object spanning multiple lines.
+    Uses the full first-to-last brace span as the primary path, with a
+    newline-escape retry for models that emit literal newlines inside strings.
     """
-    merged: dict = {}
-    for m in re.finditer(r'\{[^{}]+\}', raw, re.DOTALL):
-        result = _try_load_json(m.group())
-        if result:
-            merged.update(result)
-    if merged:
-        return merged
-
     start, end = raw.find("{"), raw.rfind("}") + 1
+    if start == -1 or end <= start:
+        raise ValueError("No JSON object found in model output")
     result = _try_load_json(raw[start:end])
-    if result:
+    if result is not None:
         return result
     raise ValueError("No valid JSON found")
 
 
 def generate(lead: dict) -> dict:
-    """Generate a personalized outreach email for a lead.
+    """Generate a personalized outreach email and phone argumentario for a lead.
 
     Args:
-        lead: Enriched lead dict from web_analyzer.
+        lead: Enriched lead dict from web_analyzer, optionally extended with
+              ``city`` and ``profession`` from the job payload.
 
     Returns:
-        Dict with keys ``subject`` and ``body``. Falls back to a generic
-        message if the model output cannot be parsed.
+        Dict with keys ``subject``, ``body``, and ``phone_script``.
+        Falls back to stub values if the model output cannot be parsed.
     """
     name = lead.get("lead", "")
-    text = _complete(SYSTEM_PROMPT, _build_prompt(lead))
+
+    raw = _complete(_build_prompt(lead))
 
     try:
-        parsed = _parse(text)
-        middle = parsed.get("body", "")
-        if isinstance(middle, dict):
-            middle = middle.get("text", middle.get("content", str(middle)))
-        middle = middle.replace("\\n", "\n").strip() or _FALLBACK_MIDDLE
-        subject = parsed.get("subject", "").strip() or f"Propuesta de mejora web para {name}"
-        return {"subject": subject, "body": _assemble(name, middle)}
-    except (ValueError, KeyError):
+        parsed = _parse(raw)
+
+        phone_raw = parsed.get("phone_script") or ""
+        phone_text = _dict_to_text(phone_raw) if isinstance(phone_raw, dict) else str(phone_raw)
+
+        result = {
+            "subject": (parsed.get("subject") or f"Propuesta de mejora web para {name}").strip(),
+            "body": (parsed.get("body") or "").replace("\\n", "\n").strip(),
+            "phone_script": phone_text.replace("\\n", "\n").strip(),
+        }
+        print(f"[AI] Generated for '{name}': {len(result['body'])}b email, {len(result['phone_script'])}b script")
+        return result
+    except (ValueError, KeyError) as exc:
+        print(f"[!] AI parse failed for '{name}' ({exc}): {raw[:200]!r}")
         return {
             "subject": f"Propuesta de mejora web para {name}",
-            "body": _assemble(name, _FALLBACK_MIDDLE),
+            "body": "",
+            "phone_script": "",
         }
