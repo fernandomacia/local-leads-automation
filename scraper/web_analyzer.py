@@ -18,6 +18,7 @@ from config import SOCIAL_DOMAINS
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 10
+PROBE_TIMEOUT = 5  # shorter timeout for secondary HEAD probes (sitemap, robots.txt)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -56,7 +57,7 @@ def _fetch(url: str, *, log_failure: bool = False) -> tuple[str, BeautifulSoup] 
             ``_extract_email`` stay silent since 404s there are expected and frequent.
     """
     try:
-        resp = requests.get(url, timeout=TIMEOUT, headers=HEADERS, allow_redirects=True, verify=False)
+        resp = requests.get(url, timeout=(5, TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         resp.raise_for_status()
         return resp.text, BeautifulSoup(resp.text, "html.parser")
     except requests.RequestException as e:
@@ -124,10 +125,29 @@ def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
 
 def _url_exists(url: str) -> bool:
     try:
-        resp = requests.head(url, timeout=5, headers=HEADERS, allow_redirects=True, verify=False)
+        resp = requests.head(url, timeout=(3, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         return resp.status_code < 400
     except requests.RequestException:
         return False
+
+
+SEO_ISSUE_LABELS: dict[str, str] = {
+    "no_https":           "Sin certificado SSL (web no segura)",
+    "no_title":           "Sin título de página",
+    "no_meta_description":"Sin descripción para buscadores (meta description)",
+    "no_h1":              "Sin título principal (H1)",
+    "multiple_h1":        "Múltiples títulos principales (H1)",
+    "no_viewport":        "No adaptada a dispositivos móviles",
+    "no_canonical":       "Sin URL canónica",
+    "no_lang":            "Sin idioma declarado en el HTML",
+    "no_og_tags":         "Sin etiquetas para redes sociales (Open Graph)",
+    "no_structured_data": "Sin datos estructurados (Schema.org)",
+    "no_alt_images":      "Imágenes sin texto alternativo (alt)",
+    "no_analytics":       "Sin herramienta de analítica web",
+    "no_favicon":         "Sin icono de la web (favicon)",
+    "no_sitemap":         "Sin mapa del sitio (sitemap.xml)",
+    "no_robots":          "Sin archivo robots.txt",
+}
 
 
 def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
@@ -168,15 +188,15 @@ def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
         issues.append("no_og_tags")
     if not soup.find("script", attrs={"type": "application/ld+json"}):
         issues.append("no_structured_data")
-    if any(img for img in soup.find_all("img") if not img.get("alt")):
+    if any(img for img in soup.find_all("img") if img.get("alt") is None):
         issues.append("no_alt_images")
 
     # GA4, GTM, Universal Analytics, and legacy _gaq all count as "analytics present"
-    html_str = str(soup)
-    if not any(s in html_str for s in ("gtag(", "googletagmanager.com", "google-analytics.com", "_gaq")):
+    scripts = " ".join((s.string or "") + " " + (s.get("src") or "") for s in soup.find_all("script"))
+    if not any(s in scripts for s in ("gtag(", "googletagmanager.com", "google-analytics.com", "_gaq")):
         issues.append("no_analytics")
 
-    if not soup.find("link", rel=lambda r: isinstance(r, list) and "icon" in r or r == "icon"):
+    if not soup.find("link", rel=lambda r: r and "icon" in (r if isinstance(r, list) else [r])):
         issues.append("no_favicon")
 
     # Each of these requires an extra HEAD request
@@ -192,8 +212,17 @@ def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
 _EMPTY_ANALYSIS: dict = {
     "cms": "", "email": "",
     **{p: "" for p in SOCIAL_DOMAINS},
-    "seo_score": 0, "seo_issues": "",
+    "seo_score": None, "seo_issues": {},
 }
+
+# All fields that constitute a reachable contact channel (phone is scraped from Maps but not
+# returned by analyze(), so it's intentionally excluded here)
+_CONTACT_FIELDS = ("email", *SOCIAL_DOMAINS)
+
+
+def is_contactable(lead: dict) -> bool:
+    """Return True if a lead has at least one reachable contact channel."""
+    return any(lead.get(f, "").strip() for f in _CONTACT_FIELDS)
 
 
 def analyze(lead: dict) -> dict:
@@ -228,5 +257,5 @@ def analyze(lead: dict) -> dict:
         "email": _extract_email(soup, url),
         **_extract_socials(soup),
         "seo_score": seo_score,
-        "seo_issues": "|".join(seo_issues),
+        "seo_issues": {k: SEO_ISSUE_LABELS.get(k, k) for k in seo_issues},
     }
