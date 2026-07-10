@@ -19,18 +19,16 @@ Google Maps → extract businesses
 ## Module Architecture
 
 ```
-main.py                      # Pipeline orchestrator (CLI entry point)
-app.py                       # Streamlit dashboard — launches pipeline and shows results
+worker.py                    # Daemon: polls SegurSEO-API job queues, drives scraping/analysis
 scraper/
   maps_scraper.py            # Extracts lead, website, phone, address from Google Maps
-  web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring
+                              # scrape() for ad-hoc use; scrape_incrementally() for worker.py
+  web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring, is_contactable()
 ai/
   message_generator.py       # Generates personalized outreach emails via OpenRouter API
 api/
-  client.py                  # Saves leads.json and optionally POSTs to external API
-data/
-  leads.json                 # Single output: all fields from all phases (flat JSON)
-config.py                    # Constants and configuration (scraper, OpenRouter, sender identity)
+  client.py                  # SegurSEO-API job-queue client: claim/report/complete/fail endpoints
+config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
 ```
 
 ## Tech Stack
@@ -38,8 +36,6 @@ config.py                    # Constants and configuration (scraper, OpenRouter,
 - **Python 3.13** with venv
 - **Playwright** — Google Maps scraping (real browser to avoid blocks)
 - **requests + BeautifulSoup** — lead website analysis
-- **pandas** — data handling in the Streamlit dashboard
-- **Streamlit** — web UI for running the pipeline and reviewing results
 - **requests + OpenRouter API** — message generation via DeepSeek (`deepseek/deepseek-chat`)
 - **python-dotenv** — environment variable management (`.env`)
 
@@ -76,7 +72,7 @@ def analyze_website(url: str) -> dict:
 - Not verbose: prefer concise expressions over long blocks
 - No unnecessary defensive error handling — errors should be visible for debugging
 - No premature abstractions — if something is used once, a class is not needed
-- Each module does one thing; `main.py` orchestrates
+- Each module does one thing; `worker.py` orchestrates
 
 ---
 
@@ -104,13 +100,19 @@ def analyze_website(url: str) -> dict:
 
 ### Work Sessions
 - Build in phases: make it work first, then polish
-- Current phase: **Phase 4 complete — CLI + Streamlit dashboard shipped; preparing Phase 5**
+- Current phase: **Phase 5 complete — SegurSEO-API job-queue worker shipped**
 - At the end of each phase, update this file with lessons learned
 
 ### Scraping
 - Use `time.sleep()` with realistic values (3–6s between actions), never less
-- `HEADLESS = True` in `config.py`; set to `False` only for debugging
-- Pass `max_results=N` to `scrape()` to limit results during testing
+- Pass `max_results=N` to `scrape()` or `scrape_incrementally()` to limit results during testing
+- `scrape_incrementally()` opens each listing in its own tab (`context.new_page()`)
+  but shares one `browser.new_context()` with the results-list tab — separate
+  contexts (e.g. `browser.new_page()`) don't share consent cookies, so every
+  detail tab would hang on Google's consent screen and time out
+- `MAX_IDLE_SCROLLS` bounds `scrape_incrementally()`: it stops after that many
+  consecutive scroll waves with no new *non-skipped* lead, so re-scraping an
+  already-known city/profession doesn't scroll forever
 
 ### Outreach
 - Final sending is semi-manual (not mass automated) to comply with GDPR
@@ -169,3 +171,5 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
 - [x] Phase 3: Message generation with local LLM (Qwen2.5-7B, 4-bit), full pipeline
 - [x] Phase 4.1: Switched message generation from local LLM to OpenRouter API (DeepSeek)
 - [x] Phase 4: CLI (`--profession`, `--city`, `--max`, `--no-headless`) + Streamlit dashboard + API client + JSON output
+- [x] Phase 5: SegurSEO-API job-queue integration — `worker.py` daemon polling two queues (Maps discovery, lead analysis); `api/client.py` rewritten around the 6-endpoint contract; `scrape_incrementally()` added to `maps_scraper.py` for batched, domain-deduplicated discovery.
+- [x] Phase 6: Removed `main.py`, `app.py`, `data/` and Streamlit/pandas dependencies — pipeline is now driven exclusively by the SegurSEO-API job queue via Angular + Laravel.

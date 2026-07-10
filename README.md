@@ -1,4 +1,4 @@
-# local-leads-automation v1.0.0
+# local-leads-automation
 
 Lead generation tool for web developers. Extracts local businesses from Google Maps, analyzes their website quality, and generates personalized outreach emails using an LLM via OpenRouter.
 
@@ -9,12 +9,12 @@ Lead generation tool for web developers. Extracts local businesses from Google M
 ## Pipeline
 
 ```
-Google Maps
-  → scrape businesses (name, phone, address, city, province)
+SegurSEO-API (Angular → Laravel)
+  → scrape businesses from Google Maps (name, phone, address, city, province)
   → analyze website (CMS, email, social networks, SEO score)
-  → filter contactable leads (email, phone, or any social network)
+  → filter contactable leads (email or any social network)
   → generate personalized outreach email (OpenRouter LLM)
-  → save to data/leads.json
+  → report results back to the API
   → assisted manual outreach
 ```
 
@@ -24,6 +24,7 @@ Google Maps
 
 - Python 3.13+
 - OpenRouter API key (for message generation)
+- SegurSEO-API running with a valid worker token
 
 ---
 
@@ -44,37 +45,23 @@ playwright install chromium
 
 # Configure environment variables
 cp .env.example .env
-# Edit .env with your OpenRouter API key, sender identity, and optional API credentials
+# Edit .env with your API credentials, OpenRouter key, and sender identity
 ```
 
 ---
 
 ## Usage
 
-### Streamlit dashboard (recommended)
+### Worker daemon
 
 ```bash
-streamlit run app.py
+python worker.py
 ```
 
-Opens a browser UI where you can set the profession, city, and result limit, then run the full pipeline and review results in a table.
-
-### Command line
-
-```bash
-python main.py --profession abogados --city Elche
-python main.py --profession abogados --city Elche --max 20
-python main.py --profession abogados --city Elche --max 20 --no-headless
-```
-
-| Flag | Description |
-|---|---|
-| `--profession` | Type of business to search (required) |
-| `--city` | City to search in (required) |
-| `--max N` | Cap on listings to collect (default: all) |
-| `--no-headless` | Open the browser visibly (for debugging) |
-
-Results are saved to `data/leads.json`.
+Runs continuously, polling SegurSEO-API for pending search and analysis jobs.
+Requires `API_BASE_URL` and `API_TOKEN` in `.env`. Jobs are created via the
+Angular frontend — results are reported straight to the API via
+`report_leads()` / `report_analysis()`.
 
 ---
 
@@ -95,8 +82,8 @@ Results are saved to `data/leads.json`.
 | `instagram` … `tiktok` | Web | Social media profile URLs |
 | `seo_score` | Web | 0–100 (100 − 10 per issue found) |
 | `seo_issues` | Web | Pipe-separated detected issues (see below) |
-| `subject` | AI | Generated email subject line |
-| `body` | AI | Generated email body (ready to send) |
+| `email_subject` | AI | Generated email subject line |
+| `email_body` | AI | Generated email body (ready to send) |
 
 ### SEO issues detected
 
@@ -122,18 +109,15 @@ Results are saved to `data/leads.json`.
 ## Project Structure
 
 ```
-main.py                      # Pipeline orchestrator (CLI entry point)
-app.py                       # Streamlit dashboard
+worker.py                    # Daemon: polls SegurSEO-API job queues, drives scraping/analysis
 scraper/
   maps_scraper.py            # Scrapes businesses from Google Maps
   web_analyzer.py            # CMS detection, contacts, SEO scoring
 ai/
   message_generator.py       # Generates outreach emails via OpenRouter
 api/
-  client.py                  # Saves leads.json; optional POST to external API
-data/
-  leads.json                 # Full pipeline output (flat JSON)
-config.py                    # Scraper, OpenRouter, and sender configuration
+  client.py                  # SegurSEO-API job-queue client (used by worker.py)
+config.py                    # Scraper, OpenRouter, sender, and API worker configuration
 .env                         # Secrets (do not commit)
 ```
 
@@ -146,6 +130,8 @@ config.py                    # Scraper, OpenRouter, and sender configuration
 - [x] **Phase 2** — Web analyzer: CMS detection, email extraction, social networks, SEO scoring (14 checks)
 - [x] **Phase 3** — Message generation: OpenRouter LLM (DeepSeek), contactable lead filtering, full pipeline
 - [x] **Phase 4** — CLI flags, Streamlit dashboard, API client, JSON output, full refactor
+- [x] **Phase 5** — SegurSEO-API job-queue integration: `worker.py` daemon, `scrape_incrementally()`, domain deduplication
+- [x] **Phase 6** — Removed local pipeline (`main.py`, `app.py`, Streamlit/pandas) — driven exclusively by the API
 
 ---
 
@@ -154,4 +140,4 @@ config.py                    # Scraper, OpenRouter, and sender configuration
 - Delays are set to 3–6 seconds between scraping actions to simulate human behavior.
 - Message sending is **semi-manual** — AI-generated drafts are reviewed before sending, in compliance with GDPR.
 - Message generation calls the OpenRouter API (`OPENROUTER_API_KEY` required in `.env`).
-- Leads without any reachable contact channel (email, phone, or social network) are skipped in Phase 3.
+- Leads without any reachable contact channel (email or social network) are skipped in message generation.
