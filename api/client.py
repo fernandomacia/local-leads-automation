@@ -1,73 +1,62 @@
-"""API client for persisting and syncing leads.
+"""API client for the SegurSEO-API scraper job queue.
 
-Saves the pipeline output as a flat JSON file and, when ``API_URL`` is
-configured, POSTs a nested representation to the external endpoint.
+Each function wraps one endpoint of the worker contract: claiming the next
+job, reporting results, and signaling completion or failure.
 """
 
-import json
 import requests
-from urllib.parse import urlparse
 
-from config import API_URL, API_KEY, SOCIAL_DOMAINS
+from config import API_BASE_URL, API_TOKEN
 
-_SOCIAL_FIELDS = tuple(SOCIAL_DOMAINS.keys())
-_LOCATION_FIELDS = ("address", "zip_code", "city", "province")
+_HEADERS = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
 
 
-def _serialize(lead: dict) -> dict:
-    """Convert a flat lead dict to the nested API payload schema.
-
-    The website is normalized to a bare hostname (no protocol, www, or path)
-    and seo_issues is split from a pipe-delimited string into a list.
-    """
-    seo_issues = [i for i in lead.get("seo_issues", "").split("|") if i]
-    raw_url = lead.get("website", "")
-    host = urlparse(raw_url).netloc.lower().removeprefix("www.")
-    return {
-        "lead": lead.get("lead", ""),
-        "website": host or raw_url,
-        "maps_url": lead.get("maps_url", ""),
-        "location": {f: lead.get(f, "") for f in _LOCATION_FIELDS},
-        "contact": {
-            "phone": lead.get("phone", ""),
-            "email": lead.get("email", ""),
-        },
-        "social": {f: lead.get(f, "") for f in _SOCIAL_FIELDS},
-        "analysis": {
-            "cms": lead.get("cms", ""),
-            "seo_score": lead.get("seo_score", 0),
-            "seo_issues": seo_issues,
-        },
-        "outreach": {
-            "subject": lead.get("subject", ""),
-            "body": lead.get("body", ""),
-        },
-    }
-
-
-def send(leads: list[dict]) -> None:
-    """Persist leads locally and optionally sync to the remote API.
-
-    Always writes ``data/leads.json`` as a flat list. The POST payload uses
-    the nested schema from ``_serialize``; the local file retains the flat
-    pipeline shape so the Streamlit app can read it directly.
-
-    Args:
-        leads: Flat lead dicts produced by the pipeline.
-    """
-    with open("data/leads.json", "w", encoding="utf-8") as f:
-        json.dump(leads, f, ensure_ascii=False, indent=2)
-    print("[+] Leads saved → data/leads.json")
-
-    if not API_URL:
-        print("[!] API_URL not configured — skipping API sync")
-        return
-
-    payload = [_serialize(lead) for lead in leads]
-    headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
-
-    resp = requests.post(API_URL, json=payload, headers=headers, timeout=30)
+def claim_next_search_job() -> dict | None:
+    """Claim the next pending Maps-discovery job, or None if the queue is empty."""
+    resp = requests.get(f"{API_BASE_URL}/api/scraper/jobs/next", headers=_HEADERS, timeout=30)
     resp.raise_for_status()
-    print(f"[+] API sync: {len(payload)} leads sent → HTTP {resp.status_code}")
+    return resp.json().get("data")
+
+
+def report_leads(search_id: str, leads: list[dict]) -> int:
+    """Submit a batch of mapped leads for a search job. Returns the count created."""
+    resp = requests.post(
+        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/leads",
+        json={"leads": leads}, headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]["created"]
+
+
+def complete_search_job(search_id: str, results_count: int) -> None:
+    """Mark a search job as complete with the total accumulated lead count."""
+    resp = requests.post(
+        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/complete",
+        json={"results_count": results_count}, headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def fail_search_job(search_id: str, error_message: str) -> None:
+    """Mark a search job as failed with an error message."""
+    resp = requests.post(
+        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/fail",
+        json={"error_message": error_message}, headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def claim_next_analysis_job() -> dict | None:
+    """Claim the next pending lead-analysis job, or None if the queue is empty."""
+    resp = requests.get(f"{API_BASE_URL}/api/scraper/leads/next", headers=_HEADERS, timeout=30)
+    resp.raise_for_status()
+    return resp.json().get("data")
+
+
+def report_analysis(lead_id: str, analysis: dict) -> None:
+    """Submit the mapped analysis/outreach result for a single lead."""
+    resp = requests.patch(
+        f"{API_BASE_URL}/api/scraper/leads/{lead_id}/analysis",
+        json=analysis, headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
