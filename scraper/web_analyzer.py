@@ -17,8 +17,9 @@ from config import SOCIAL_DOMAINS
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-TIMEOUT = 10
-PROBE_TIMEOUT = 5  # shorter timeout for secondary HEAD probes (sitemap, robots.txt)
+TIMEOUT = 15
+CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
+PROBE_TIMEOUT = 5           # secondary HEAD probes (sitemap, robots.txt)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -57,7 +58,7 @@ def _fetch(url: str, *, log_failure: bool = False) -> tuple[str, BeautifulSoup] 
             ``_extract_email`` stay silent since 404s there are expected and frequent.
     """
     try:
-        resp = requests.get(url, timeout=(5, TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
+        resp = requests.get(url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         resp.raise_for_status()
         return resp.text, BeautifulSoup(resp.text, "html.parser")
     except requests.RequestException as e:
@@ -125,7 +126,7 @@ def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
 
 def _url_exists(url: str) -> bool:
     try:
-        resp = requests.head(url, timeout=(3, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
+        resp = requests.head(url, timeout=(CONNECT_TIMEOUT, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         return resp.status_code < 400
     except requests.RequestException:
         return False
@@ -217,11 +218,15 @@ _EMPTY_ANALYSIS: dict = {
 
 # All fields that constitute a reachable contact channel (phone is scraped from Maps but not
 # returned by analyze(), so it's intentionally excluded here)
-_CONTACT_FIELDS = ("email", *SOCIAL_DOMAINS)
+_CONTACT_FIELDS = ("website", "email", *SOCIAL_DOMAINS)
 
 
 def is_contactable(lead: dict) -> bool:
-    """Return True if a lead has at least one reachable contact channel."""
+    """Return True if the lead has a website, email, or social profile.
+
+    Note: phone is not returned by analyze() — callers with access to the full
+    lead record (e.g. the worker's job dict) should check it separately.
+    """
     return any(lead.get(f, "").strip() for f in _CONTACT_FIELDS)
 
 
