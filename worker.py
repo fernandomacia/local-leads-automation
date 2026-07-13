@@ -12,7 +12,7 @@ import requests
 
 from config import BATCH_SIZE, POLL_INTERVAL, SOCIAL_DOMAINS
 from scraper.maps_scraper import scrape_incrementally
-from scraper.web_analyzer import analyze, is_contactable
+from scraper.web_analyzer import analyze
 from ai.message_generator import generate
 from api.client import (
     claim_next_search_job,
@@ -101,12 +101,32 @@ def run_analysis_job(job: dict) -> None:
     try:
         print(f"[~] Analyzing {job['business_name']} ({job['website'] or 'no website'})")
         analysis = analyze({"lead": job["business_name"], "website": job["website"]})
+
+        cms = analysis.get("cms")
+        print(f"    cms={cms!r}  seo_score={analysis.get('seo_score')!r}  email={analysis.get('email')!r}")
+
+        if cms == "unreachable":
+            print(f"[~] Site unreachable — reporting as unreachable: {job['business_name']}")
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
+            return
+
+        if not job.get("website"):
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
+            return
+
+        socials = [f for f in _SOCIAL_FIELDS if analysis.get(f)]
+        print(f"    socials={socials}")
+        print(f"    Generating message (city={job.get('city')!r}, profession={job.get('profession')!r})...")
         message = generate({
             **analysis,
             "city": job.get("city", ""),
             "profession": job.get("profession", ""),
-        }) if is_contactable(analysis) else {}
-        report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+        })
+        print(f"    subject={message.get('subject', '')[:60]!r}  body_len={len(message.get('body', ''))}  script_len={len(message.get('phone_script', ''))}")
+
+        payload = map_analysis_to_api_shape(analysis, message)
+        print(f"    Reporting keys: {list(payload.keys())}")
+        report_analysis(job["id"], payload)
         print(f"[+] Analysis done: {job['business_name']}")
     except Exception as e:
         print(f"[!] Analysis job {job['id']} ({job['business_name']}) failed: {e}")
