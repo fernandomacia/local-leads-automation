@@ -11,7 +11,7 @@ import time
 import requests
 
 from config import BATCH_SIZE, POLL_INTERVAL, SOCIAL_DOMAINS
-from scraper.maps_scraper import scrape_incrementally
+from scraper.maps_scraper import scrape_incrementally, MAPS_ISSUE_LABELS
 from scraper.web_analyzer import analyze
 from ai.message_generator import generate
 from api.client import (
@@ -24,6 +24,13 @@ from api.client import (
 )
 
 _SOCIAL_FIELDS = tuple(SOCIAL_DOMAINS.keys())
+
+_MAPS_FIELD_KEYS = {"no_website": "website", "no_phone": "phone", "no_address": "address"}
+
+
+def _maps_issues(job: dict) -> dict[str, str]:
+    """Return Maps card issues for fields missing from the job payload."""
+    return {k: MAPS_ISSUE_LABELS[k] for k, field in _MAPS_FIELD_KEYS.items() if not job.get(field)}
 
 
 def map_to_api_shape(lead: dict) -> dict:
@@ -103,25 +110,46 @@ def run_analysis_job(job: dict) -> None:
         analysis = analyze({"lead": job["business_name"], "website": job["website"]})
 
         cms = analysis.get("cms")
+        maps = _maps_issues(job)
         print(f"    cms={cms!r}  seo_score={analysis.get('seo_score')!r}  email={analysis.get('email')!r}")
+        print(f"    maps_issues={list(maps.keys())}")
+
+        base_context = {
+            **analysis,
+            "city": job.get("city", ""),
+            "profession": job.get("profession", ""),
+            "maps_issues": maps,
+        }
 
         if cms == "unreachable":
-            print(f"[~] Site unreachable — reporting as unreachable: {job['business_name']}")
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
+            if not (job.get("phone") or job.get("email")):
+                print(f"[~] Site unreachable, no contact channel — skipping: {job['business_name']}")
+                report_analysis(job["id"], {"failed": True})
+                print(f"[+] Analysis done (unreachable, no contact): {job['business_name']}")
+                return
+            print(f"    Site unreachable — generating broken-website pitch...")
+            message = generate({**base_context, "has_website": True})
+            print(f"    script_len={len(message.get('phone_script', ''))}")
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            print(f"[+] Analysis done (unreachable + pitch): {job['business_name']}")
             return
 
         if not job.get("website"):
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
+            if not (job.get("phone") or job.get("email")):
+                print(f"[~] No website and no contact channel — skipping: {job['business_name']}")
+                report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
+                return
+            print(f"    No website — generating phone script only...")
+            message = generate({**base_context, "has_website": False})
+            print(f"    script_len={len(message.get('phone_script', ''))}")
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            print(f"[+] Analysis done (no website): {job['business_name']}")
             return
 
         socials = [f for f in _SOCIAL_FIELDS if analysis.get(f)]
         print(f"    socials={socials}")
         print(f"    Generating message (city={job.get('city')!r}, profession={job.get('profession')!r})...")
-        message = generate({
-            **analysis,
-            "city": job.get("city", ""),
-            "profession": job.get("profession", ""),
-        })
+        message = generate({**base_context, "has_website": True})
         print(f"    subject={message.get('subject', '')[:60]!r}  body_len={len(message.get('body', ''))}  script_len={len(message.get('phone_script', ''))}")
 
         payload = map_analysis_to_api_shape(analysis, message)

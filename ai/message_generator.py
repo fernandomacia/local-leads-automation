@@ -17,9 +17,18 @@ if not SENDER_COMPANY:
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM_PROMPT = f"""Eres un agente comercial de {SENDER_COMPANY}, empresa especializada en diseño web y SEO para negocios locales.
-Tu tarea es generar dos materiales de venta personalizados para un negocio local: un email completo y un argumentario telefónico.
+Tu tarea es generar materiales de venta personalizados para un negocio local.
 
-Recibirás datos técnicos sobre la web del negocio. Transforma esa información en argumentos de negocio concretos: pérdida de visibilidad, falta de credibilidad o clientes potenciales que no llegan. Nunca menciones tecnicismos directamente, solo sus consecuencias reales para el negocio.
+Recibirás datos sobre el negocio. Transforma la información en argumentos de negocio concretos: pérdida de visibilidad, falta de credibilidad o clientes potenciales que no llegan. Nunca menciones tecnicismos directamente, solo sus consecuencias reales.
+
+ESCENARIO A — El negocio tiene sitio web (tiene_web: true):
+Genera email completo Y argumentario. El pitch se basa en los problemas SEO detectados en la web y los de la ficha de Google Maps.
+- Caso especial: si cms es "unreachable", el sitio web existe en la ficha de Google Maps pero está caído o no es accesible. El pitch principal es que los clientes que buscan el negocio en Google no pueden acceder a la web (pérdida directa de clientes). No menciones análisis SEO técnico. Usa este problema como argumento para ofrecer un sitio nuevo o la recuperación del actual.
+
+ESCENARIO B — El negocio NO tiene sitio web (tiene_web: false):
+El pitch principal es la ausencia de presencia online y los problemas de la ficha de Google Maps.
+- Si hay email_contacto: genera email completo Y argumentario.
+- Si NO hay email_contacto: devuelve subject y body como cadenas vacías; genera solo argumentario.
 
 NORMAS DEL EMAIL:
 - Tratamiento de usted en todo momento
@@ -42,16 +51,21 @@ Responde ÚNICAMENTE con JSON válido, sin texto adicional:
 def _build_prompt(lead: dict) -> str:
     social = {k: lead[k] for k in SOCIAL_DOMAINS if lead.get(k)}
     seo_issues = lead.get("seo_issues") or {}
-    issues = list(seo_issues.values()) if isinstance(seo_issues, dict) else []
+    seo_problems = list(seo_issues.values()) if isinstance(seo_issues, dict) else []
+    maps_issues = lead.get("maps_issues") or {}
+    maps_problems = list(maps_issues.values()) if isinstance(maps_issues, dict) else []
+    has_website = lead.get("has_website", bool(lead.get("website")))
 
     data = {
         "negocio": lead.get("lead", ""),
         "ciudad": lead.get("city", "") or "",
         "profesion": lead.get("profession", "") or "",
-        "web": lead.get("website", "") or "sin web propia",
-        "cms": lead.get("cms", "") or "desconocido",
+        "tiene_web": has_website,
+        "web": lead.get("website", "") or "",
+        "cms": lead.get("cms", "") or "",
         "puntuacion_seo": lead.get("seo_score"),
-        "problemas_detectados": issues,
+        "problemas_seo": seo_problems,
+        "problemas_google_maps": maps_problems,
         "email_contacto": lead.get("email", "") or "",
         "redes_sociales": social,
     }
@@ -170,8 +184,9 @@ def generate(lead: dict) -> dict:
         phone_raw = parsed.get("phone_script") or ""
         phone_text = _dict_to_text(phone_raw) if isinstance(phone_raw, dict) else str(phone_raw)
 
+        has_email_channel = lead.get("has_website") or bool(lead.get("email"))
         result = {
-            "subject": (parsed.get("subject") or f"Propuesta de mejora web para {name}").strip(),
+            "subject": (parsed.get("subject") or (f"Propuesta de mejora web para {name}" if has_email_channel else "")).strip(),
             "body": (parsed.get("body") or "").replace("\\n", "\n").strip(),
             "phone_script": phone_text.replace("\\n", "\n").strip(),
         }

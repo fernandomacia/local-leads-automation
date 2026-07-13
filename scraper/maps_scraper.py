@@ -39,6 +39,13 @@ SELECTOR_FEED = 'div[role="feed"]'
 
 SCROLL_PIXELS = 600
 
+# Maps card fields the AI can use as pitch arguments — parallel to SEO_ISSUE_LABELS in web_analyzer.py
+MAPS_ISSUE_LABELS: dict[str, str] = {
+    "no_website": "Sin sitio web en Google Maps",
+    "no_phone":   "Sin teléfono en Google Maps",
+    "no_address": "Sin dirección en Google Maps",
+}
+
 
 def _get_delay(base_delay: float) -> float:
     """Return base_delay with ±JITTER_RANGE% random variance to mimic human timing."""
