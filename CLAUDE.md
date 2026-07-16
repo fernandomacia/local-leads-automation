@@ -111,8 +111,9 @@ def analyze_website(url: str) -> dict:
   contexts (e.g. `browser.new_page()`) don't share consent cookies, so every
   detail tab would hang on Google's consent screen and time out
 - `MAX_IDLE_SCROLLS` bounds `scrape_incrementally()`: it stops after that many
-  consecutive scroll waves with no new *non-skipped* lead, so re-scraping an
-  already-known city/profession doesn't scroll forever
+  consecutive scroll waves with no new hrefs at all (end of feed), so an
+  exhausted search doesn't scroll forever. Known (skipped) leads reset the
+  counter — only a truly empty scroll wave counts as idle.
 
 ### Outreach
 - Final sending is semi-manual (not mass automated) to comply with GDPR

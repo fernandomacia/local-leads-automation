@@ -319,7 +319,7 @@ def scrape_incrementally(
                     if max_results and yielded >= max_results:
                         return
 
-                idle_scrolls = 0 if found_new else idle_scrolls + 1
+                idle_scrolls = 0 if new_hrefs else idle_scrolls + 1
                 if idle_scrolls >= MAX_IDLE_SCROLLS:
                     print(f"[!] Stopping: {MAX_IDLE_SCROLLS} consecutive scrolls with no new lead")
                     break
