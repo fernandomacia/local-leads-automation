@@ -20,6 +20,7 @@ from api.client import (
     complete_search_job,
     fail_search_job,
     claim_next_analysis_job,
+    report_payment_error,
     report_analysis,
 )
 
@@ -156,6 +157,21 @@ def run_analysis_job(job: dict) -> None:
         print(f"    Reporting keys: {list(payload.keys())}")
         report_analysis(job["id"], payload)
         print(f"[+] Analysis done: {job['business_name']}")
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 402:
+            print(f"[!] OpenRouter payment required — lead left pending for retry: {job['business_name']}")
+            search_id = job.get("lead_search_id")
+            if search_id:
+                try:
+                    report_payment_error(search_id)
+                except Exception:
+                    pass
+            raise  # propagate so main() sleeps before retrying
+        print(f"[!] Analysis job {job['id']} ({job['business_name']}) failed: {e}")
+        try:
+            report_analysis(job["id"], {"failed": True})
+        except Exception as report_exc:
+            print(f"[!] Could not report analysis failure for job {job['id']}: {report_exc}")
     except Exception as e:
         print(f"[!] Analysis job {job['id']} ({job['business_name']}) failed: {e}")
         try:
@@ -175,6 +191,13 @@ def main() -> None:
             if job := claim_next_analysis_job():
                 run_analysis_job(job)
                 continue
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 402:
+                pause = 120
+                print(f"[!] OpenRouter sin saldo — reintentando en {pause}s. Recarga créditos en openrouter.ai")
+                time.sleep(pause)
+                continue
+            print(f"[!] API error ({e.__class__.__name__}), retrying in {POLL_INTERVAL}s...")
         except requests.RequestException as e:
             print(f"[!] API error ({e.__class__.__name__}), retrying in {POLL_INTERVAL}s...")
         time.sleep(POLL_INTERVAL + random.uniform(0, 2))

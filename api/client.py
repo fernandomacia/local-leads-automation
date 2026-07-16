@@ -53,6 +53,15 @@ def claim_next_analysis_job() -> dict | None:
     return resp.json().get("data")
 
 
+def report_payment_error(search_id: str) -> None:
+    """Flag the parent search as blocked by an OpenRouter payment error."""
+    resp = requests.post(
+        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/payment-error",
+        headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
+
+
 def report_analysis(lead_id: str, analysis: dict) -> None:
     """Submit the mapped analysis/outreach result for a single lead."""
     resp = requests.patch(
