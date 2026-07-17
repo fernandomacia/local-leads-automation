@@ -305,10 +305,11 @@ def scrape_incrementally(
                     detail_page.close()
                     if lead is None:
                         continue
-                    if lead["website"] and _normalize_domain(lead["website"]) in skip:
+                    name = lead.get("lead", "")
+                    domain = _normalize_domain(lead.get("website", ""))
+                    if lead["website"] and domain in skip:
                         continue
                     if not lead["website"]:
-                        name = lead.get("lead", "")
                         if name in seen_names:
                             continue
                         seen_names.add(name)

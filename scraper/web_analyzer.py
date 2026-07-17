@@ -254,11 +254,12 @@ def analyze(lead: dict) -> dict:
         return {**lead, **_EMPTY_ANALYSIS, "cms": "unreachable"}
 
     html, soup = result
+    cms = _detect_cms(html)
     seo_score, seo_issues = _score_seo(soup, url)
 
     return {
         **lead,
-        "cms": _detect_cms(html),
+        "cms": cms,
         "email": _extract_email(soup, url),
         **_extract_socials(soup),
         "seo_score": seo_score,
