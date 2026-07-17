@@ -72,8 +72,8 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
         payload["email_subject"] = message["subject"]
     if message.get("body"):
         payload["email_body"] = message["body"]
-    if message.get("phone_script"):
-        payload["phone_script"] = message["phone_script"]
+    # Always send phone_script (even "") so NULL stays exclusive to "not yet analyzed"
+    payload["phone_script"] = message.get("phone_script", "")
 
     return payload
 
