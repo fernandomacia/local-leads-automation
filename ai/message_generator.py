@@ -111,7 +111,7 @@ def _complete(user_prompt: str) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "max_tokens": 1500,
+        "max_tokens": 2000,
         "temperature": 0.6,
         "response_format": {"type": "json_object"},
     }
