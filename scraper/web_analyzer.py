@@ -7,19 +7,19 @@ early and routed out without a full fetch.
 """
 
 import re
-import urllib3
+import warnings
 from urllib.parse import urljoin, urlparse
+from urllib3.exceptions import InsecureRequestWarning
 
 import requests
 from bs4 import BeautifulSoup
 
 from config import SOCIAL_DOMAINS
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
 PROBE_TIMEOUT = 5           # secondary HEAD probes (sitemap, robots.txt)
+PROBE_CONNECT_TIMEOUT = 3   # short connect timeout for trivial static-file probes
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -52,7 +52,10 @@ _CONTACT_PATHS = ("/contacto", "/contact", "/contactar")
 def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
     """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure."""
     try:
-        resp = requests.get(url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
+        # verify=False: many local business sites have misconfigured or self-signed certs
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+            resp = requests.get(url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         resp.raise_for_status()
         return resp.text, BeautifulSoup(resp.text, "html.parser")
     except requests.RequestException:
@@ -118,7 +121,9 @@ def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
 
 def _url_exists(url: str) -> bool:
     try:
-        resp = requests.head(url, timeout=(CONNECT_TIMEOUT, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+            resp = requests.head(url, timeout=(PROBE_CONNECT_TIMEOUT, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         return resp.status_code < 400
     except requests.RequestException:
         return False
