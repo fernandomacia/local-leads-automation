@@ -13,6 +13,8 @@ load_dotenv(override=True)
 
 API_BASE_URL = os.getenv("API_BASE_URL", "")
 API_TOKEN = os.getenv("API_TOKEN", "")
+if not API_BASE_URL or not API_TOKEN:
+    raise EnvironmentError("API_BASE_URL and API_TOKEN must be set in .env")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
