@@ -10,7 +10,7 @@ import time
 
 import requests
 
-from config import BATCH_SIZE, POLL_INTERVAL, SOCIAL_DOMAINS
+from config import BATCH_SIZE, HEADLESS, POLL_INTERVAL, SOCIAL_DOMAINS
 from scraper.maps_scraper import scrape_incrementally, MAPS_ISSUE_LABELS
 from scraper.web_analyzer import analyze
 from ai.message_generator import generate
@@ -85,7 +85,7 @@ def run_search_job(job: dict) -> None:
     total = 0
     try:
         for lead in scrape_incrementally(
-            job["profession"], job["city"], skip=known, max_results=job["max_results"]
+            job["profession"], job["city"], headless=HEADLESS, skip=known, max_results=job["max_results"]
         ):
             batch.append(map_to_api_shape(lead))
             total += 1
@@ -95,9 +95,7 @@ def run_search_job(job: dict) -> None:
         if batch:
             report_leads(job["id"], batch)
         complete_search_job(job["id"], total)
-        print(f"[+] Search job {job['id']} complete: {total} new leads")
     except Exception as e:
-        print(f"[!] Search job {job['id']} failed: {e}")
         try:
             fail_search_job(job["id"], str(e))
         except Exception:
@@ -107,14 +105,10 @@ def run_search_job(job: dict) -> None:
 def run_analysis_job(job: dict) -> None:
     """Analyze a single lead's website and generate its outreach message."""
     try:
-        print(f"[~] Analyzing {job['business_name']} ({job['website'] or 'no website'})")
         analysis = analyze({"lead": job["business_name"], "website": job["website"]})
 
         cms = analysis.get("cms")
         maps = _maps_issues(job)
-        print(f"    cms={cms!r}  seo_score={analysis.get('seo_score')!r}  email={analysis.get('email')!r}")
-        print(f"    maps_issues={list(maps.keys())}")
-
         base_context = {
             **analysis,
             "city": job.get("city", ""),
@@ -124,65 +118,44 @@ def run_analysis_job(job: dict) -> None:
 
         if cms == "unreachable":
             if not (job.get("phone") or job.get("email")):
-                print(f"[~] Site unreachable, no contact channel — skipping: {job['business_name']}")
                 report_analysis(job["id"], {"failed": True})
-                print(f"[+] Analysis done (unreachable, no contact): {job['business_name']}")
                 return
-            print(f"    Site unreachable — generating broken-website pitch...")
             message = generate({**base_context, "has_website": True})
-            print(f"    script_len={len(message.get('phone_script', ''))}")
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-            print(f"[+] Analysis done (unreachable + pitch): {job['business_name']}")
             return
 
         if not job.get("website"):
             if not (job.get("phone") or job.get("email")):
-                print(f"[~] No website and no contact channel — skipping: {job['business_name']}")
                 report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
                 return
-            print(f"    No website — generating phone script only...")
             message = generate({**base_context, "has_website": False})
-            print(f"    script_len={len(message.get('phone_script', ''))}")
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-            print(f"[+] Analysis done (no website): {job['business_name']}")
             return
 
-        socials = [f for f in _SOCIAL_FIELDS if analysis.get(f)]
-        print(f"    socials={socials}")
-        print(f"    Generating message (city={job.get('city')!r}, profession={job.get('profession')!r})...")
         message = generate({**base_context, "has_website": True})
-        print(f"    subject={message.get('subject', '')[:60]!r}  body_len={len(message.get('body', ''))}  script_len={len(message.get('phone_script', ''))}")
-
-        payload = map_analysis_to_api_shape(analysis, message)
-        print(f"    Reporting keys: {list(payload.keys())}")
-        report_analysis(job["id"], payload)
-        print(f"[+] Analysis done: {job['business_name']}")
+        report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 402:
-            print(f"[!] OpenRouter payment required — lead left pending for retry: {job['business_name']}")
             search_id = job.get("lead_search_id")
             if search_id:
                 try:
                     report_payment_error(search_id)
                 except Exception:
                     pass
-            raise  # propagate so main() sleeps before retrying
-        print(f"[!] Analysis job {job['id']} ({job['business_name']}) failed: {e}")
+            raise
         try:
             report_analysis(job["id"], {"failed": True})
-        except Exception as report_exc:
-            print(f"[!] Could not report analysis failure for job {job['id']}: {report_exc}")
-    except Exception as e:
-        print(f"[!] Analysis job {job['id']} ({job['business_name']}) failed: {e}")
+        except Exception:
+            pass
+    except Exception:
         try:
             report_analysis(job["id"], {"failed": True})
-        except Exception as report_exc:
-            print(f"[!] Could not report analysis failure for job {job['id']}: {report_exc}")
+        except Exception:
+            pass
 
 
 def main() -> None:
     """Poll the job queue forever, prioritizing search jobs over analysis jobs."""
-    print("[+] Worker started, polling for jobs...")
     while True:
         try:
             if job := claim_next_search_job():
@@ -193,13 +166,10 @@ def main() -> None:
                 continue
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 402:
-                pause = 120
-                print(f"[!] OpenRouter sin saldo — reintentando en {pause}s. Recarga créditos en openrouter.ai")
-                time.sleep(pause)
+                time.sleep(120)
                 continue
-            print(f"[!] API error ({e.__class__.__name__}), retrying in {POLL_INTERVAL}s...")
-        except requests.RequestException as e:
-            print(f"[!] API error ({e.__class__.__name__}), retrying in {POLL_INTERVAL}s...")
+        except requests.RequestException:
+            pass
         time.sleep(POLL_INTERVAL + random.uniform(0, 2))
 
 

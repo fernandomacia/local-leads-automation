@@ -37,6 +37,7 @@ JITTER_RANGE = 0.2          # applied as ±(base × JITTER_RANGE) random varianc
 RETRY_BACKOFF_BASE = 2      # exponential backoff base on timeout retries
 MAX_EXTRACTION_RETRIES = 3
 MAX_IDLE_SCROLLS = 5        # consecutive scroll waves with no new non-skipped lead before giving up
+HEADLESS = os.getenv("HEADLESS", "true").lower() != "false"
 
 # ── AI message generation ─────────────────────────────────────────────────────
 
