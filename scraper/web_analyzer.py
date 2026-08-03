@@ -19,7 +19,6 @@ from config import SOCIAL_DOMAINS
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
 PROBE_TIMEOUT = 5           # secondary HEAD probes (sitemap, robots.txt)
-PROBE_CONNECT_TIMEOUT = 3   # short connect timeout for trivial static-file probes
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -123,7 +122,7 @@ def _url_exists(url: str) -> bool:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", InsecureRequestWarning)
-            resp = requests.head(url, timeout=(PROBE_CONNECT_TIMEOUT, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
+            resp = requests.head(url, timeout=(CONNECT_TIMEOUT, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         return resp.status_code < 400
     except requests.RequestException:
         return False
