@@ -87,8 +87,7 @@ def _start_search(p, profession: str, city: str, headless: bool) -> tuple[Browse
     try:
         page.wait_for_selector(SELECTOR_RESULTS, timeout=15000)
     except PlaywrightTimeoutError:
-        # No listings found (e.g. small town with no matches) — callers handle an empty page naturally
-        print(f"[!] No results found for '{profession}' in '{city}'")
+        pass  # No listings found — callers handle an empty page naturally
 
     return browser, context, page
 
@@ -201,11 +200,8 @@ def _extract_with_retries(page: Page, href: str, default_city: str = "") -> dict
         except PlaywrightTimeoutError:
             retries += 1
             if retries < MAX_EXTRACTION_RETRIES:
-                wait_time = _exponential_backoff(retries)
-                print(f"    [retry {retries}] Timeout, waiting {wait_time:.1f}s...")
-                time.sleep(wait_time)
-        except PlaywrightError as e:
-            print(f"  [!] Skipped listing: {type(e).__name__}")
+                time.sleep(_exponential_backoff(retries))
+        except PlaywrightError:
             return None
     return None
 
@@ -236,20 +232,12 @@ def scrape(profession: str, city: str, headless: bool = False, max_results: int 
     """
     with sync_playwright() as p:
         browser, _, page = _start_search(p, profession, city, headless)
-
-        print(f"[+] Collecting results for {profession} in {city}...")
         hrefs = _collect_hrefs(page, max_results)
-        print(f"[+] Found {len(hrefs)} listings, extracting...")
-
         leads = []
-        for i, href in enumerate(hrefs):
+        for href in hrefs:
             lead = _extract_with_retries(page, href, city)
-            if lead is None:
-                continue
-            print(f"  [{i + 1}/{len(hrefs)}] {lead['lead']}")
-            leads.append(lead)
-
-        print(f"[+] Done. Total leads: {len(leads)}")
+            if lead is not None:
+                leads.append(lead)
         browser.close()
         return leads
 
@@ -288,7 +276,6 @@ def scrape_incrementally(
     with sync_playwright() as p:
         browser, context, list_page = _start_search(p, profession, city, headless)
         try:
-            print(f"[+] Collecting results for {profession} in {city}...")
             seen_hrefs: set[str] = set()
             seen_names: set[str] = set()  # dedup no-website leads within this session
             yielded = 0
@@ -322,7 +309,6 @@ def scrape_incrementally(
 
                 idle_scrolls = 0 if new_hrefs else idle_scrolls + 1
                 if idle_scrolls >= MAX_IDLE_SCROLLS:
-                    print(f"[!] Stopping: {MAX_IDLE_SCROLLS} consecutive scrolls with no new lead")
                     break
 
                 _scroll_feed(list_page)

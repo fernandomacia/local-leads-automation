@@ -190,10 +190,8 @@ def generate(lead: dict) -> dict:
             "body": (parsed.get("body") or "").replace("\\n", "\n").strip(),
             "phone_script": phone_text.replace("\\n", "\n").strip(),
         }
-        print(f"[AI] Generated for '{name}': {len(result['body'])}b email, {len(result['phone_script'])}b script")
         return result
-    except (ValueError, KeyError) as exc:
-        print(f"[!] AI parse failed for '{name}' ({exc}): {raw[:200]!r}")
+    except (ValueError, KeyError):
         return {
             "subject": f"Propuesta de mejora web para {name}",
             "body": "",

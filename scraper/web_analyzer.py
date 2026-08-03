@@ -49,21 +49,13 @@ _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _CONTACT_PATHS = ("/contacto", "/contact", "/contactar")
 
 
-def _fetch(url: str, *, log_failure: bool = False) -> tuple[str, BeautifulSoup] | None:
-    """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure.
-
-    Args:
-        log_failure: Print the failure reason (HTTP status, DNS error, timeout, etc.).
-            Used for the primary site fetch in ``analyze()``; contact-page probes in
-            ``_extract_email`` stay silent since 404s there are expected and frequent.
-    """
+def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
+    """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure."""
     try:
         resp = requests.get(url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         resp.raise_for_status()
         return resp.text, BeautifulSoup(resp.text, "html.parser")
-    except requests.RequestException as e:
-        if log_failure:
-            print(f"  [!] Unreachable: {url} — {e}")
+    except requests.RequestException:
         return None
 
 
@@ -249,7 +241,7 @@ def analyze(lead: dict) -> dict:
     if platform:
         return {**lead, "website": "", **_EMPTY_ANALYSIS, platform: url}
 
-    result = _fetch(url, log_failure=True)
+    result = _fetch(url)
     if not result:
         return {**lead, **_EMPTY_ANALYSIS, "cms": "unreachable"}
 
