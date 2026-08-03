@@ -5,6 +5,7 @@ keeps the API's lead database in sync. Runs continuously as a background
 daemon, driven entirely by the API.
 """
 
+import logging
 import random
 import time
 
@@ -23,6 +24,8 @@ from api.client import (
     report_payment_error,
     report_analysis,
 )
+
+logger = logging.getLogger(__name__)
 
 _SOCIAL_FIELDS = tuple(SOCIAL_DOMAINS.keys())
 
@@ -96,6 +99,7 @@ def run_search_job(job: dict) -> None:
             report_leads(job["id"], batch)
         complete_search_job(job["id"], total)
     except Exception as e:
+        logger.exception("Search job %s failed", job["id"])
         try:
             fail_search_job(job["id"], str(e))
         except Exception:
@@ -143,11 +147,13 @@ def run_analysis_job(job: dict) -> None:
                 except Exception:
                     pass
             raise
+        logger.exception("Analysis job %s (%s) failed with HTTP error", job["id"], job["business_name"])
         try:
             report_analysis(job["id"], {"failed": True})
         except Exception:
             pass
     except Exception:
+        logger.exception("Analysis job %s (%s) failed", job["id"], job["business_name"])
         try:
             report_analysis(job["id"], {"failed": True})
         except Exception:
@@ -156,6 +162,10 @@ def run_analysis_job(job: dict) -> None:
 
 def main() -> None:
     """Poll the job queue forever, prioritizing search jobs over analysis jobs."""
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     while True:
         try:
             if job := claim_next_search_job():
@@ -168,8 +178,9 @@ def main() -> None:
             if e.response is not None and e.response.status_code == 402:
                 time.sleep(120)
                 continue
-        except requests.RequestException:
-            pass
+            logger.error("API HTTP error in main loop: %s", e)
+        except requests.RequestException as e:
+            logger.warning("API connection error, retrying: %s", e)
         time.sleep(POLL_INTERVAL + random.uniform(0, 2))
 
 

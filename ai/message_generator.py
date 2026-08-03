@@ -5,11 +5,14 @@ a JSON object with a complete email (subject + body) and a phone argumentario.
 """
 
 import json
+import logging
 import re
 
 import requests
 
 from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, SENDER_COMPANY, SOCIAL_DOMAINS
+
+logger = logging.getLogger(__name__)
 
 if not SENDER_COMPANY:
     raise EnvironmentError("SENDER_COMPANY must be set in .env")
@@ -191,7 +194,8 @@ def generate(lead: dict) -> dict:
             "phone_script": phone_text.replace("\\n", "\n").strip(),
         }
         return result
-    except (ValueError, KeyError):
+    except (ValueError, KeyError) as exc:
+        logger.exception("AI parse failed for '%s': %s — raw: %.200r", name, exc, raw)
         return {
             "subject": f"Propuesta de mejora web para {name}",
             "body": "",
