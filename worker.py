@@ -83,6 +83,7 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
 
 def run_search_job(job: dict) -> None:
     """Discover businesses for a search job, reporting new leads in batches."""
+    print(f"[>] Search: {job['profession']} en {job['city']}")
     known = set(job["known_domains"])
     batch: list[dict] = []
     total = 0
@@ -98,6 +99,7 @@ def run_search_job(job: dict) -> None:
         if batch:
             report_leads(job["id"], batch)
         complete_search_job(job["id"], total)
+        print(f"[+] Search done: {total} leads")
     except Exception as e:
         logger.exception("Search job %s failed", job["id"])
         try:
@@ -108,6 +110,7 @@ def run_search_job(job: dict) -> None:
 
 def run_analysis_job(job: dict) -> None:
     """Analyze a single lead's website and generate its outreach message."""
+    print(f"[>] Analyzing: {job['business_name']}")
     try:
         analysis = analyze({"lead": job["business_name"], "website": job["website"]})
 
@@ -126,6 +129,7 @@ def run_analysis_job(job: dict) -> None:
                 return
             message = generate({**base_context, "has_website": True})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            print(f"[+] Done: {job['business_name']}")
             return
 
         if not job.get("website"):
@@ -134,10 +138,12 @@ def run_analysis_job(job: dict) -> None:
                 return
             message = generate({**base_context, "has_website": False})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            print(f"[+] Done: {job['business_name']}")
             return
 
         message = generate({**base_context, "has_website": True})
         report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+        print(f"[+] Done: {job['business_name']}")
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 402:
             search_id = job.get("lead_search_id")
@@ -166,6 +172,7 @@ def main() -> None:
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    print("[+] Worker started")
     while True:
         try:
             if job := claim_next_search_job():
