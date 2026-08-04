@@ -81,8 +81,12 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
     return payload
 
 
-def run_search_job(job: dict) -> None:
-    """Discover businesses for a search job, reporting new leads in batches."""
+def run_search_job(job: dict) -> int:
+    """Discover businesses for a search job, reporting new leads in batches.
+
+    Returns:
+        Total number of new leads reported.
+    """
     print(f"[>] Search: {job['profession']} en {job['city']}")
     known = set(job["known_domains"])
     batch: list[dict] = []
@@ -106,11 +110,13 @@ def run_search_job(job: dict) -> None:
             fail_search_job(job["id"], str(e))
         except Exception:
             pass
+    return total
 
 
-def run_analysis_job(job: dict) -> None:
+def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> None:
     """Analyze a single lead's website and generate its outreach message."""
-    print(f"[>] Analyzing: {job['business_name']}")
+    counter = f" {idx}/{total}" if total else ""
+    print(f"\r[>] Analyzing{counter}", end="", flush=True)
     try:
         analysis = analyze({"lead": job["business_name"], "website": job["website"]})
 
@@ -129,7 +135,6 @@ def run_analysis_job(job: dict) -> None:
                 return
             message = generate({**base_context, "has_website": True})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-            print(f"[+] Done: {job['business_name']}")
             return
 
         if not job.get("website"):
@@ -138,12 +143,10 @@ def run_analysis_job(job: dict) -> None:
                 return
             message = generate({**base_context, "has_website": False})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-            print(f"[+] Done: {job['business_name']}")
             return
 
         message = generate({**base_context, "has_website": True})
         report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-        print(f"[+] Done: {job['business_name']}")
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 402:
             search_id = job.get("lead_search_id")
@@ -173,13 +176,19 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     print("[+] Worker started")
+    analysis_idx = 0
+    analysis_total = 0
     while True:
         try:
             if job := claim_next_search_job():
-                run_search_job(job)
+                analysis_total = run_search_job(job)
+                analysis_idx = 0
                 continue
             if job := claim_next_analysis_job():
-                run_analysis_job(job)
+                analysis_idx += 1
+                run_analysis_job(job, analysis_idx, analysis_total)
+                if analysis_total and analysis_idx == analysis_total:
+                    print(f"\r[+] Done ({analysis_total} analyzed)" + " " * 10)
                 continue
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 402:
