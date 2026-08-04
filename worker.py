@@ -178,18 +178,24 @@ def main() -> None:
     print("[+] Worker started")
     analysis_idx = 0
     analysis_total = 0
+    was_analyzing = False
     while True:
         try:
             if job := claim_next_search_job():
+                if was_analyzing:
+                    print(f"\r[+] Done ({analysis_idx} analyzed)" + " " * 10)
+                    was_analyzing = False
                 analysis_total = run_search_job(job)
                 analysis_idx = 0
                 continue
             if job := claim_next_analysis_job():
                 analysis_idx += 1
+                was_analyzing = True
                 run_analysis_job(job, analysis_idx, analysis_total)
-                if analysis_total and analysis_idx == analysis_total:
-                    print(f"\r[+] Done ({analysis_total} analyzed)" + " " * 10)
                 continue
+            if was_analyzing:
+                print(f"\r[+] Done ({analysis_idx} analyzed)" + " " * 10)
+                was_analyzing = False
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 402:
                 time.sleep(120)
