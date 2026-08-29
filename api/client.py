@@ -46,6 +46,16 @@ def fail_search_job(search_id: str, error_message: str) -> None:
     resp.raise_for_status()
 
 
+def check_known_domains(domains: list[str]) -> list[str]:
+    """Return the subset of the given URLs whose domains are already in the system."""
+    resp = requests.post(
+        f"{API_BASE_URL}/api/scraper/domains/check",
+        json={"domains": domains}, headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]["known"]
+
+
 def claim_next_analysis_job() -> dict | None:
     """Claim the next pending lead-analysis job, or None if the queue is empty."""
     resp = requests.get(f"{API_BASE_URL}/api/scraper/leads/next", headers=_HEADERS, timeout=30)

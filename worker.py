@@ -17,6 +17,7 @@ from scraper.web_analyzer import analyze
 from ai.message_generator import generate
 from api.client import (
     claim_next_search_job,
+    check_known_domains,
     report_leads,
     complete_search_job,
     fail_search_job,
@@ -81,27 +82,44 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
     return payload
 
 
+def _flush_batch(search_id: str, batch: list[dict], skip: set[str]) -> int:
+    """Submit a batch of leads, updating the skip set with newly found known domains.
+
+    Calls check_known_domains so future scraper pages avoid opening detail tabs for
+    domains already in the system. Returns the count of leads actually inserted
+    (server-side deduplication handles the final filter).
+    """
+    if not batch:
+        return 0
+    domains = [b["website"] for b in batch if b.get("website")]
+    if domains:
+        skip.update(check_known_domains(domains))
+    return report_leads(search_id, batch)
+
+
 def run_search_job(job: dict) -> int:
     """Discover businesses for a search job, reporting new leads in batches.
 
     Returns:
-        Total number of new leads reported.
+        Total number of new leads actually inserted (after server-side dedup).
     """
     print(f"[>] Search: {job['profession']} en {job['city']}")
-    known = set(job["known_domains"])
+    # skip starts empty and is populated from check_known_domains responses so
+    # subsequent Maps pages silently bypass already-known domains without opening
+    # a detail tab for each. The set is passed by reference so scrape_incrementally
+    # sees every update made inside _flush_batch.
+    skip: set[str] = set()
     batch: list[dict] = []
     total = 0
     try:
         for lead in scrape_incrementally(
-            job["profession"], job["city"], headless=HEADLESS, skip=known, max_results=job["max_results"]
+            job["profession"], job["city"], headless=HEADLESS, skip=skip, max_results=job["max_results"]
         ):
             batch.append(map_to_api_shape(lead))
-            total += 1
             if len(batch) >= BATCH_SIZE:
-                report_leads(job["id"], batch)
+                total += _flush_batch(job["id"], batch, skip)
                 batch = []
-        if batch:
-            report_leads(job["id"], batch)
+        total += _flush_batch(job["id"], batch, skip)
         complete_search_job(job["id"], total)
         print(f"[+] Search done: {total} leads")
     except Exception as e:
