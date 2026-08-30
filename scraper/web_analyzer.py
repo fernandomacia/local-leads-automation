@@ -79,8 +79,13 @@ def _host_ok(url: str) -> bool:
         return False
 
 
-def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
-    """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure."""
+def _fetch(url: str) -> tuple[str, BeautifulSoup, str] | None:
+    """Fetch a URL and return ``(raw_html, soup, final_url)``. Returns ``None`` on any failure.
+
+    ``final_url`` is ``resp.url`` after redirects and must be used as the base
+    for any subsequent probes (sitemap, contact page, etc.) to avoid targeting
+    the pre-redirect host.
+    """
     if not _host_ok(url):
         return None
     try:
@@ -101,7 +106,7 @@ def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
             return None
         raw = resp.raw.read(MAX_RESPONSE_BYTES, decode_content=True)
         text = raw.decode("utf-8", errors="replace")
-        return text, BeautifulSoup(text, "html.parser")
+        return text, BeautifulSoup(text, "html.parser"), resp.url
     except requests.RequestException:
         return None
 
@@ -141,7 +146,7 @@ def _extract_email(soup: BeautifulSoup, base_url: str) -> str:
         result = _fetch(urljoin(base_url, path))
         if not result:
             continue
-        _, contact_soup = result
+        _, contact_soup, _ = result
         mailto = contact_soup.find("a", href=re.compile(r"^mailto:", re.I))
         if mailto:
             return mailto["href"][7:].split("?")[0].strip().lower()
@@ -169,7 +174,7 @@ def _url_exists(url: str) -> bool:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", InsecureRequestWarning)
-            resp = requests.head(url, timeout=(CONNECT_TIMEOUT, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
+            resp = requests.head(url, timeout=(PROBE_TIMEOUT, PROBE_TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
         return resp.status_code < 400
     except requests.RequestException:
         return False
@@ -296,14 +301,14 @@ def analyze(lead: dict) -> dict:
     if not result:
         return {**lead, **_EMPTY_ANALYSIS, "cms": "unreachable"}
 
-    html, soup = result
+    html, soup, final_url = result
     cms = _detect_cms(html)
-    seo_score, seo_issues = _score_seo(soup, url)
+    seo_score, seo_issues = _score_seo(soup, final_url)
 
     return {
         **lead,
         "cms": cms,
-        "email": _extract_email(soup, url),
+        "email": _extract_email(soup, final_url),
         **_extract_socials(soup),
         "seo_score": seo_score,
         "seo_issues": {k: SEO_ISSUE_LABELS.get(k, k) for k in seo_issues},
