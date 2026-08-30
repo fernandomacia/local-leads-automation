@@ -6,7 +6,9 @@ on-page SEO issues. Social-only URLs (Instagram, Facebook, etc.) are detected
 early and routed out without a full fetch.
 """
 
+import ipaddress
 import re
+import socket
 import warnings
 from urllib.parse import urljoin, urlparse
 from urllib3.exceptions import InsecureRequestWarning
@@ -19,6 +21,7 @@ from config import SOCIAL_DOMAINS
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
 PROBE_TIMEOUT = 5           # secondary HEAD probes (sitemap, robots.txt)
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB cap — prevents memory exhaustion on huge responses
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -48,15 +51,57 @@ _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _CONTACT_PATHS = ("/contacto", "/contact", "/contactar")
 
 
+def _is_public_host(host: str) -> bool:
+    """Return True only if every address the host resolves to is globally routable.
+
+    Rejects private, loopback, link-local, reserved, and multicast ranges to
+    prevent SSRF against cloud metadata endpoints or internal services.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    if not infos:
+        return False
+    for _, _, _, _, (addr, *_) in infos:
+        ip = ipaddress.ip_address(addr)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+    return True
+
+
+def _host_ok(url: str) -> bool:
+    """Return True if the URL's host resolves to a public IP."""
+    try:
+        host = urlparse(url).hostname
+        return bool(host) and _is_public_host(host)
+    except Exception:
+        return False
+
+
 def _fetch(url: str) -> tuple[str, BeautifulSoup] | None:
     """Fetch a URL and return ``(raw_html, soup)``. Returns ``None`` on any failure."""
+    if not _host_ok(url):
+        return None
     try:
         # verify=False: many local business sites have misconfigured or self-signed certs
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", InsecureRequestWarning)
-            resp = requests.get(url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS, allow_redirects=True, verify=False)
+            resp = requests.get(
+                url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS,
+                allow_redirects=True, verify=False, stream=True,
+            )
         resp.raise_for_status()
-        return resp.text, BeautifulSoup(resp.text, "html.parser")
+        # Guard against open-redirect chains landing on an internal host
+        if resp.url != url and not _host_ok(resp.url):
+            return None
+        # Skip non-HTML responses (binary files, JSON APIs, etc.)
+        ct = resp.headers.get("Content-Type", "")
+        if not ("html" in ct or "text" in ct):
+            return None
+        raw = resp.raw.read(MAX_RESPONSE_BYTES, decode_content=True)
+        text = raw.decode("utf-8", errors="replace")
+        return text, BeautifulSoup(text, "html.parser")
     except requests.RequestException:
         return None
 
@@ -119,6 +164,8 @@ def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
 
 
 def _url_exists(url: str) -> bool:
+    if not _host_ok(url):
+        return False
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", InsecureRequestWarning)
