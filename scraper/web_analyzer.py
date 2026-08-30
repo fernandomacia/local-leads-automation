@@ -79,23 +79,31 @@ def _host_ok(url: str) -> bool:
         return False
 
 
-def _fetch(url: str) -> tuple[str, BeautifulSoup, str] | None:
-    """Fetch a URL and return ``(raw_html, soup, final_url)``. Returns ``None`` on any failure.
+def _fetch(url: str) -> tuple[str, BeautifulSoup, str, bool] | None:
+    """Fetch a URL and return ``(raw_html, soup, final_url, invalid_ssl)``.
 
-    ``final_url`` is ``resp.url`` after redirects and must be used as the base
-    for any subsequent probes (sitemap, contact page, etc.) to avoid targeting
-    the pre-redirect host.
+    Tries ``verify=True`` first; on ``SSLError`` retries with ``verify=False``
+    and sets ``invalid_ssl=True`` so callers can report it as a distinct SEO issue.
+    ``final_url`` is ``resp.url`` after redirects.
+    Returns ``None`` on any unrecoverable failure.
     """
     if not _host_ok(url):
         return None
+    invalid_ssl = False
     try:
-        # verify=False: many local business sites have misconfigured or self-signed certs
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", InsecureRequestWarning)
+        try:
             resp = requests.get(
                 url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS,
-                allow_redirects=True, verify=False, stream=True,
+                allow_redirects=True, verify=True, stream=True,
             )
+        except requests.exceptions.SSLError:
+            invalid_ssl = True
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", InsecureRequestWarning)
+                resp = requests.get(
+                    url, timeout=(CONNECT_TIMEOUT, TIMEOUT), headers=HEADERS,
+                    allow_redirects=True, verify=False, stream=True,
+                )
         resp.raise_for_status()
         # Guard against open-redirect chains landing on an internal host
         if resp.url != url and not _host_ok(resp.url):
@@ -106,7 +114,7 @@ def _fetch(url: str) -> tuple[str, BeautifulSoup, str] | None:
             return None
         raw = resp.raw.read(MAX_RESPONSE_BYTES, decode_content=True)
         text = raw.decode("utf-8", errors="replace")
-        return text, BeautifulSoup(text, "html.parser"), resp.url
+        return text, BeautifulSoup(text, "html.parser"), resp.url, invalid_ssl
     except requests.RequestException:
         return None
 
@@ -146,7 +154,7 @@ def _extract_email(soup: BeautifulSoup, base_url: str) -> str:
         result = _fetch(urljoin(base_url, path))
         if not result:
             continue
-        _, contact_soup, _ = result
+        _, contact_soup, _, _ = result
         mailto = contact_soup.find("a", href=re.compile(r"^mailto:", re.I))
         if mailto:
             return mailto["href"][7:].split("?")[0].strip().lower()
@@ -182,6 +190,7 @@ def _url_exists(url: str) -> bool:
 
 SEO_ISSUE_LABELS: dict[str, str] = {
     "no_https":           "Sin certificado SSL (web no segura)",
+    "invalid_ssl":        "Certificado SSL caducado o no válido",
     "no_title":           "Sin título de página",
     "no_meta_description":"Sin descripción para buscadores (meta description)",
     "no_h1":              "Sin título principal (H1)",
@@ -199,13 +208,17 @@ SEO_ISSUE_LABELS: dict[str, str] = {
 }
 
 
-def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
+def _score_seo(soup: BeautifulSoup, url: str, *, invalid_ssl: bool = False) -> tuple[int, list[str]]:
     """Audit the page for common SEO issues and return a score and issue list.
 
     Each issue deducts 10 points from 100. Checks cover security (HTTPS),
     on-page tags (title, meta, h1, viewport, canonical, lang, OG, structured data,
     alt attributes), analytics presence, favicon, and crawlability (sitemap,
     robots.txt). The last two require one extra HEAD request each.
+
+    Args:
+        invalid_ssl: True when the site required ``verify=False`` to load —
+            reported as ``invalid_ssl`` instead of ``no_https``.
 
     Returns:
         A tuple of ``(score, issues)`` where score is clamped to ``[0, 100]``
@@ -215,7 +228,9 @@ def _score_seo(soup: BeautifulSoup, url: str) -> tuple[int, list[str]]:
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-    if not url.startswith("https://"):
+    if invalid_ssl:
+        issues.append("invalid_ssl")
+    elif not url.startswith("https://"):
         issues.append("no_https")
 
     if not soup.find("title"):
@@ -301,9 +316,9 @@ def analyze(lead: dict) -> dict:
     if not result:
         return {**lead, **_EMPTY_ANALYSIS, "cms": "unreachable"}
 
-    html, soup, final_url = result
+    html, soup, final_url, invalid_ssl = result
     cms = _detect_cms(html)
-    seo_score, seo_issues = _score_seo(soup, final_url)
+    seo_score, seo_issues = _score_seo(soup, final_url, invalid_ssl=invalid_ssl)
 
     return {
         **lead,
