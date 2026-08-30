@@ -50,6 +50,37 @@ CMS_SIGNATURES: list[tuple[str, list[str]]] = [
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _CONTACT_PATHS = ("/contacto", "/contact", "/contactar")
 
+# Domains that almost never belong to the actual business
+_EMAIL_NOISE_DOMAINS = frozenset({
+    "sentry.io", "example.com", "example.org", "wixpress.com", "wordpress.org",
+    "googletagmanager.com", "google.com", "facebook.com", "instagram.com",
+    "schema.org", "w3.org", "yourdomain.com", "domain.com",
+})
+# Regex TLDs that indicate a misparse (e.g. "hero@2x.png" or "icon@something.svg")
+_FAKE_TLD_RE = re.compile(r"\.(png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot)$", re.I)
+
+
+def _best_email(emails: list[str], site_domain: str) -> str:
+    """Return the most relevant email from candidates, preferring the site's own domain.
+
+    Filters out noise (tool domains, image file misparses, placeholder addresses)
+    then ranks own-domain emails first.
+    """
+    def _is_noise(email: str) -> bool:
+        domain = email.split("@")[-1]
+        return (
+            domain in _EMAIL_NOISE_DOMAINS
+            or bool(_FAKE_TLD_RE.search(domain))
+            or email.startswith("example")
+        )
+
+    clean = [e for e in emails if not _is_noise(e)]
+    if not clean:
+        return ""
+    own = [e for e in clean if e.split("@")[-1] == site_domain
+           or e.split("@")[-1].endswith("." + site_domain)]
+    return (own or clean)[0]
+
 
 def _is_public_host(host: str) -> bool:
     """Return True only if every address the host resolves to is globally routable.
@@ -139,28 +170,31 @@ def _detect_cms(html: str) -> str:
 def _extract_email(soup: BeautifulSoup, base_url: str) -> str:
     """Find an email address on the page, falling back to common contact sub-pages.
 
-    Priority: mailto link → regex match in page text → same checks on /contacto,
-    /contact, and /contactar.
+    Collects all mailto links (higher signal) and regex matches, then picks the
+    best via _best_email — preferring addresses on the site's own domain over
+    agency or tool addresses that appear first in the markup.
     """
-    mailto = soup.find("a", href=re.compile(r"^mailto:", re.I))
-    if mailto:
-        return mailto["href"][7:].split("?")[0].strip().lower()
+    site_domain = (urlparse(base_url).hostname or "").removeprefix("www.")
 
-    emails = _EMAIL_RE.findall(soup.get_text())
-    if emails:
-        return emails[0].lower()
+    def _candidates(s: BeautifulSoup) -> list[str]:
+        mailtos = [
+            a["href"][7:].split("?")[0].strip().lower()
+            for a in s.find_all("a", href=re.compile(r"^mailto:", re.I))
+        ]
+        return mailtos + [e.lower() for e in _EMAIL_RE.findall(s.get_text())]
+
+    email = _best_email(_candidates(soup), site_domain)
+    if email:
+        return email
 
     for path in _CONTACT_PATHS:
         result = _fetch(urljoin(base_url, path))
         if not result:
             continue
         _, contact_soup, _, _ = result
-        mailto = contact_soup.find("a", href=re.compile(r"^mailto:", re.I))
-        if mailto:
-            return mailto["href"][7:].split("?")[0].strip().lower()
-        emails = _EMAIL_RE.findall(contact_soup.get_text())
-        if emails:
-            return emails[0].lower()
+        email = _best_email(_candidates(contact_soup), site_domain)
+        if email:
+            return email
 
     return ""
 
