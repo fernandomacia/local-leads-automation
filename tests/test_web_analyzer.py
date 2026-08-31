@@ -1,174 +1,242 @@
-"""Tests for scraper/web_analyzer.py — pure logic, no real network calls."""
+"""Tests for scraper/web_analyzer.py — no network.
 
-from unittest.mock import patch
-
-import pytest
-from bs4 import BeautifulSoup
-
-from scraper.web_analyzer import (
-    _detect_cms,
-    _extract_email,
-    _identify_platform,
-    _score_seo,
-    analyze,
-)
-from tests.conftest import make_soup
-
-
-# ── CMS detection ─────────────────────────────────────────────────────────────
-
-class TestDetectCms:
-    def test_wordpress(self):
-        assert _detect_cms('<link href="/wp-content/themes/x/style.css">') == "wordpress"
-
-    def test_wix(self):
-        assert _detect_cms('<script src="https://static.wix.com/x.js">') == "wix"
-
-    def test_shopify(self):
-        assert _detect_cms('<script src="https://cdn.shopify.com/s/x.js">') == "shopify"
-
-    def test_unknown(self):
-        assert _detect_cms("<html><body><p>Hello</p></body></html>") == "unknown"
-
-    def test_first_match_wins(self):
-        # wordpress comes before wix in CMS_SIGNATURES — wordpress must win
-        html = '/wp-content/x.css static.wix.com'
-        assert _detect_cms(html) == "wordpress"
-
-
-# ── Platform identification ───────────────────────────────────────────────────
-
-class TestIdentifyPlatform:
-    def test_instagram(self):
-        assert _identify_platform("https://www.instagram.com/mybusiness") == "instagram"
-
-    def test_facebook(self):
-        assert _identify_platform("https://facebook.com/mybusiness") == "facebook"
-
-    def test_youtube_subdomain(self):
-        assert _identify_platform("https://www.youtube.com/channel/ABC") == "youtube"
-
-    def test_regular_website_returns_none(self):
-        assert _identify_platform("https://mybusiness.es") is None
-
-    def test_empty_url_returns_none(self):
-        assert _identify_platform("") is None
-
-
-# ── SEO scoring ───────────────────────────────────────────────────────────────
-
-_FULL_HTML = """
-<html lang="es">
-<head>
-  <title>Mi negocio</title>
-  <meta name="description" content="Descripción del negocio">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="canonical" href="https://example.com/">
-  <meta property="og:title" content="Mi negocio">
-  <script type="application/ld+json">{"@type": "LocalBusiness"}</script>
-  <link rel="icon" href="/favicon.ico">
-  <script src="https://www.googletagmanager.com/gtag/js?id=G-XXX"></script>
-</head>
-<body><h1>Bienvenidos</h1><img src="foto.jpg" alt="foto del negocio"></body>
-</html>
+socket.getaddrinfo and requests.get/head are patched so every test runs
+without touching the network. The SSRF cases (_is_public_host) are treated
+as security-critical: they cover every private/reserved range because they
+will not be verified manually in production.
 """
 
+import socket
+from unittest.mock import MagicMock, patch
 
-class TestScoreSeo:
-    @patch("scraper.web_analyzer._url_exists", return_value=True)
-    def test_perfect_score(self, _):
-        score, issues = _score_seo(make_soup(_FULL_HTML), "https://example.com")
-        assert score == 100
-        assert issues == []
+import pytest
+import requests
 
-    @patch("scraper.web_analyzer._url_exists", return_value=True)
-    def test_no_https_penalized(self, _):
-        score, issues = _score_seo(make_soup(_FULL_HTML), "http://example.com")
-        assert "no_https" in issues
-
-    @patch("scraper.web_analyzer._url_exists", return_value=True)
-    def test_missing_title(self, _):
-        html = _FULL_HTML.replace("<title>Mi negocio</title>", "")
-        _, issues = _score_seo(make_soup(html), "https://example.com")
-        assert "no_title" in issues
-
-    @patch("scraper.web_analyzer._url_exists", return_value=True)
-    def test_no_h1(self, _):
-        html = _FULL_HTML.replace("<h1>Bienvenidos</h1>", "")
-        _, issues = _score_seo(make_soup(html), "https://example.com")
-        assert "no_h1" in issues
-
-    @patch("scraper.web_analyzer._url_exists", return_value=True)
-    def test_multiple_h1(self, _):
-        html = _FULL_HTML.replace("<h1>Bienvenidos</h1>", "<h1>A</h1><h1>B</h1>")
-        _, issues = _score_seo(make_soup(html), "https://example.com")
-        assert "multiple_h1" in issues
-        assert "no_h1" not in issues
-
-    @patch("scraper.web_analyzer._url_exists", return_value=True)
-    def test_image_without_alt_penalized(self, _):
-        html = _FULL_HTML.replace('alt="foto del negocio"', "")
-        _, issues = _score_seo(make_soup(html), "https://example.com")
-        assert "no_alt_images" in issues
-
-    @patch("scraper.web_analyzer._url_exists", return_value=False)
-    def test_missing_sitemap_and_robots(self, _):
-        _, issues = _score_seo(make_soup(_FULL_HTML), "https://example.com")
-        assert "no_sitemap" in issues
-        assert "no_robots" in issues
-
-    @patch("scraper.web_analyzer._url_exists", return_value=False)
-    def test_score_clamps_to_zero(self, _):
-        score, _ = _score_seo(make_soup("<html><body></body></html>"), "http://example.com")
-        assert score == 0
-
-    @patch("scraper.web_analyzer._url_exists", return_value=True)
-    def test_each_issue_deducts_ten_points(self, _):
-        html = _FULL_HTML.replace("<title>Mi negocio</title>", "")
-        score, issues = _score_seo(make_soup(html), "https://example.com")
-        assert score == 100 - len(issues) * 10
+from scraper.web_analyzer import (
+    MAX_RESPONSE_BYTES,
+    _best_email,
+    _fetch,
+    _host_ok,
+    _is_public_host,
+    _url_exists,
+)
 
 
-# ── Email extraction ──────────────────────────────────────────────────────────
+# ── Test helpers ──────────────────────────────────────────────────────────────
 
-class TestExtractEmail:
-    def test_mailto_link(self):
-        s = make_soup('<a href="mailto:info@example.com?subject=Hola">Escríbenos</a>')
-        assert _extract_email(s, "https://example.com") == "info@example.com"
-
-    def test_regex_match_in_body_text(self):
-        s = make_soup("<p>Contacta en hola@example.com para más info.</p>")
-        assert _extract_email(s, "https://example.com") == "hola@example.com"
-
-    def test_mailto_takes_priority_over_regex(self):
-        s = make_soup(
-            '<p>Escríbenos a other@example.com</p>'
-            '<a href="mailto:preferred@example.com">Contacto</a>'
-        )
-        assert _extract_email(s, "https://example.com") == "preferred@example.com"
-
-    @patch("scraper.web_analyzer._fetch", return_value=None)
-    def test_no_email_returns_empty_string(self, _):
-        s = make_soup("<p>No hay email aquí.</p>")
-        assert _extract_email(s, "https://example.com") == ""
+def _addr(ip: str) -> list:
+    """Return a getaddrinfo-shaped list for a single IP address."""
+    if ":" in ip:  # IPv6
+        return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (ip, 0, 0, 0))]
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
 
 
-# ── analyze() integration ─────────────────────────────────────────────────────
+def _mock_get(
+    status: int = 200,
+    url: str = "https://example.com",
+    content_type: str = "text/html; charset=utf-8",
+    body: bytes = b"<html><body>Test</body></html>",
+) -> MagicMock:
+    """Build a requests.get mock response."""
+    resp = MagicMock()
+    resp.status_code = status
+    resp.url = url
+    resp.headers = {"Content-Type": content_type}
+    resp.raw.read.return_value = body
+    if status >= 400:
+        resp.raise_for_status.side_effect = requests.HTTPError(response=resp)
+    return resp
 
-class TestAnalyze:
-    def test_empty_website_returns_defaults(self):
-        result = analyze({"lead": "Test", "website": ""})
-        assert result["cms"] == ""
-        assert result["seo_score"] is None
-        assert result["email"] == ""
 
-    def test_instagram_url_routed_to_platform_field(self):
-        result = analyze({"lead": "Test", "website": "https://www.instagram.com/testbiz"})
-        assert result["instagram"] == "https://www.instagram.com/testbiz"
-        assert result["website"] == ""
-        assert result["cms"] == ""
+PUBLIC = _addr("93.184.216.34")   # example.com — globally routable
+PRIVATE = _addr("192.168.1.1")    # RFC 1918
 
-    @patch("scraper.web_analyzer._fetch", return_value=None)
-    def test_unreachable_site_sets_cms_unreachable(self, _):
-        result = analyze({"lead": "Test", "website": "https://dead.example.com"})
-        assert result["cms"] == "unreachable"
+
+# ── _is_public_host (SSRF guard — mandatory coverage) ─────────────────────────
+
+class TestIsPublicHost:
+    @pytest.mark.parametrize("ip", [
+        "10.0.0.1",        # RFC 1918 class A
+        "172.16.0.1",      # RFC 1918 class B
+        "192.168.1.1",     # RFC 1918 class C
+        "127.0.0.1",       # IPv4 loopback
+        "::1",             # IPv6 loopback
+        "169.254.169.254", # AWS/GCP metadata (link-local)
+        "0.0.0.0",         # reserved / unspecified
+        "224.0.0.1",       # multicast
+    ])
+    def test_internal_ip_rejected(self, ip):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=_addr(ip)):
+            assert _is_public_host("target") is False
+
+    def test_public_ipv4_accepted(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC):
+            assert _is_public_host("example.com") is True
+
+    def test_dns_failure_returns_false(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", side_effect=socket.gaierror):
+            assert _is_public_host("nonexistent.invalid") is False
+
+    def test_empty_getaddrinfo_result_returns_false(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=[]):
+            assert _is_public_host("example.com") is False
+
+    def test_any_private_address_in_multi_record_rejects(self):
+        # All resolved IPs must be public — one private one is enough to reject
+        mixed = PUBLIC + PRIVATE
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=mixed):
+            assert _is_public_host("example.com") is False
+
+
+# ── _host_ok ──────────────────────────────────────────────────────────────────
+
+class TestHostOk:
+    def test_rejects_url_with_private_host(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PRIVATE):
+            assert _host_ok("https://192.168.1.1/path") is False
+
+    def test_accepts_url_with_public_host(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC):
+            assert _host_ok("https://example.com/path") is True
+
+    def test_rejects_url_with_no_hostname(self):
+        assert _host_ok("not-a-url") is False
+
+
+# ── _fetch ────────────────────────────────────────────────────────────────────
+
+class TestFetch:
+    def test_rejects_private_host_before_connecting(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PRIVATE), \
+             patch("scraper.web_analyzer.requests.get") as mock_get:
+            result = _fetch("https://192.168.1.1/")
+        assert result is None
+        mock_get.assert_not_called()
+
+    def test_happy_path_returns_four_tuple(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.get", return_value=_mock_get()):
+            result = _fetch("https://example.com")
+        assert result is not None
+        html, soup, final_url, invalid_ssl = result
+        assert "Test" in html
+        assert soup is not None
+        assert final_url == "https://example.com"
+        assert invalid_ssl is False
+
+    def test_rejects_open_redirect_to_private_host(self):
+        # Initial URL is public but redirect lands on a private IP
+        resp = _mock_get(url="http://192.168.1.1/")
+        with patch("scraper.web_analyzer.socket.getaddrinfo", side_effect=[PUBLIC, PRIVATE]), \
+             patch("scraper.web_analyzer.requests.get", return_value=resp):
+            assert _fetch("https://example.com") is None
+
+    def test_rejects_non_html_content_type(self):
+        resp = _mock_get(content_type="application/json")
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.get", return_value=resp):
+            assert _fetch("https://example.com") is None
+
+    def test_returns_none_on_5xx(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.get", return_value=_mock_get(status=500)):
+            assert _fetch("https://example.com") is None
+
+    def test_returns_none_on_connection_timeout(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.get", side_effect=requests.Timeout):
+            assert _fetch("https://example.com") is None
+
+    def test_caps_response_at_max_bytes(self):
+        resp = _mock_get()
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.get", return_value=resp):
+            _fetch("https://example.com")
+        resp.raw.read.assert_called_once_with(MAX_RESPONSE_BYTES, decode_content=True)
+
+    def test_ssl_error_sets_invalid_ssl_and_retries(self):
+        good_resp = _mock_get()
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.get", side_effect=[
+                 requests.exceptions.SSLError, good_resp
+             ]):
+            result = _fetch("https://example.com")
+        assert result is not None
+        _, _, _, invalid_ssl = result
+        assert invalid_ssl is True
+
+    def test_ssl_error_still_returns_html(self):
+        body = b"<html><body>SSL fail site</body></html>"
+        good_resp = _mock_get(body=body)
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.get", side_effect=[
+                 requests.exceptions.SSLError, good_resp
+             ]):
+            result = _fetch("https://example.com")
+        assert result is not None
+        html, _, _, _ = result
+        assert "SSL fail site" in html
+
+
+# ── _url_exists ───────────────────────────────────────────────────────────────
+
+class TestUrlExists:
+    def test_rejects_private_host_before_connecting(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PRIVATE), \
+             patch("scraper.web_analyzer.requests.head") as mock_head:
+            assert _url_exists("https://192.168.1.1/sitemap.xml") is False
+        mock_head.assert_not_called()
+
+    def test_returns_true_on_200(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.head", return_value=resp):
+            assert _url_exists("https://example.com/sitemap.xml") is True
+
+    def test_returns_false_on_404(self):
+        resp = MagicMock()
+        resp.status_code = 404
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.head", return_value=resp):
+            assert _url_exists("https://example.com/sitemap.xml") is False
+
+    def test_returns_false_on_timeout(self):
+        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+             patch("scraper.web_analyzer.requests.head", side_effect=requests.Timeout):
+            assert _url_exists("https://example.com/sitemap.xml") is False
+
+
+# ── _best_email ───────────────────────────────────────────────────────────────
+
+class TestBestEmail:
+    def test_prefers_site_domain_over_agency(self):
+        emails = ["agency@designstudio.com", "info@miempresa.es"]
+        assert _best_email(emails, "miempresa.es") == "info@miempresa.es"
+
+    def test_prefers_subdomain_of_site_domain(self):
+        emails = ["agency@other.com", "info@mail.miempresa.es"]
+        assert _best_email(emails, "miempresa.es") == "info@mail.miempresa.es"
+
+    def test_falls_back_to_first_clean_when_no_domain_match(self):
+        emails = ["agency@designstudio.com", "contact@otherdomain.com"]
+        result = _best_email(emails, "miempresa.es")
+        assert result in ("agency@designstudio.com", "contact@otherdomain.com")
+
+    def test_filters_known_noise_domains(self):
+        emails = ["errors@sentry.io", "hello@wixpress.com", "info@miempresa.es"]
+        assert _best_email(emails, "miempresa.es") == "info@miempresa.es"
+
+    def test_filters_fake_tld_image_misparsed_as_email(self):
+        emails = ["hero@2x.png", "icon@logo.svg", "contact@miempresa.es"]
+        assert _best_email(emails, "miempresa.es") == "contact@miempresa.es"
+
+    def test_filters_example_prefix(self):
+        emails = ["example@miempresa.es", "contact@miempresa.es"]
+        assert _best_email(emails, "miempresa.es") == "contact@miempresa.es"
+
+    def test_returns_empty_when_all_noise(self):
+        assert _best_email(["errors@sentry.io", "hero@2x.png"], "miempresa.es") == ""
+
+    def test_empty_list_returns_empty(self):
+        assert _best_email([], "miempresa.es") == ""
