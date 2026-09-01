@@ -120,7 +120,10 @@ def _complete(user_prompt: str) -> str:
     }
     resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=(5, 90))
     resp.raise_for_status()
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
+    body = resp.json()
+    if "error" in body:
+        raise ValueError(f"OpenRouter error: {body['error']}")
+    raw = body["choices"][0]["message"]["content"].strip()
     # Strip markdown code fences — some models add them despite json_object mode
     if raw.startswith("```"):
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
