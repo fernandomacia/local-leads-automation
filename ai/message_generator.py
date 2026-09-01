@@ -6,7 +6,9 @@ a JSON object with a complete email (subject + body) and a phone argumentario.
 
 import json
 import logging
+import random
 import re
+import time
 
 import requests
 
@@ -18,6 +20,30 @@ if not SENDER_COMPANY:
     raise EnvironmentError("SENDER_COMPANY must be set in .env")
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 4
+
+
+def _retry_delay(resp: requests.Response, attempt: int) -> float:
+    """Return seconds to wait before the next attempt.
+
+    Prefers the server's own hint (Retry-After or X-RateLimit-Reset);
+    falls back to exponential backoff with jitter.
+    """
+    if retry_after := resp.headers.get("Retry-After"):
+        try:
+            return min(float(retry_after), 60.0)
+        except ValueError:
+            pass
+    # OpenRouter sends X-RateLimit-Reset as epoch milliseconds
+    if reset := resp.headers.get("X-RateLimit-Reset"):
+        try:
+            wait = float(reset) / 1000 - time.time()
+            if 0 < wait <= 60:
+                return wait
+        except ValueError:
+            pass
+    return min(2 ** attempt + random.uniform(0, 1), 60.0)
 
 SYSTEM_PROMPT = f"""Eres un agente comercial de {SENDER_COMPANY}, empresa especializada en diseño web y SEO para negocios locales.
 Tu tarea es generar materiales de venta personalizados para un negocio local.
@@ -103,7 +129,12 @@ def _escape_string_newlines(s: str) -> str:
 
 
 def _complete(user_prompt: str) -> str:
-    """Send a chat completion request to OpenRouter and return the raw text."""
+    """Send a chat completion request to OpenRouter and return the raw text.
+
+    Retries transient failures (rate limits, upstream 5xx) up to _MAX_ATTEMPTS
+    times using server-hinted or exponential-backoff delays. 402 is never
+    retried — it signals a billing issue handled upstream by the worker.
+    """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -118,7 +149,16 @@ def _complete(user_prompt: str) -> str:
         "temperature": 0.6,
         "response_format": {"type": "json_object"},
     }
-    resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=(5, 90))
+    for attempt in range(_MAX_ATTEMPTS):
+        resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=(5, 90))
+        if resp.status_code not in _RETRYABLE_STATUSES or attempt == _MAX_ATTEMPTS - 1:
+            break
+        delay = _retry_delay(resp, attempt)
+        logger.warning(
+            "OpenRouter %s — retrying in %.1fs (attempt %d/%d)",
+            resp.status_code, delay, attempt + 1, _MAX_ATTEMPTS,
+        )
+        time.sleep(delay)
     resp.raise_for_status()
     body = resp.json()
     if "error" in body:
