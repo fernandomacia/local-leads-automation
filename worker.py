@@ -39,17 +39,26 @@ def _maps_issues(job: dict) -> dict[str, str]:
 
 
 def map_to_api_shape(lead: dict) -> dict:
-    """Map a scraped lead to the ``POST /jobs/{id}/leads`` payload shape."""
-    return {
-        "business_name": lead.get("lead", ""),
-        "website": lead.get("website", ""),
-        "maps_url": lead.get("maps_url", ""),
-        "phone": lead.get("phone", ""),
-        "address": lead.get("address", ""),
-        "zip_code": lead.get("zip_code", ""),
-        "city": lead.get("city", ""),
-        "province": lead.get("province", ""),
-    }
+    """Map a scraped lead to the ``POST /jobs/{id}/leads`` payload shape.
+
+    Optional fields are omitted when empty rather than sent as "". Sending ""
+    relies on ConvertEmptyStringsToNull being in the middleware stack; omitting
+    the key is correct regardless of server configuration and keeps the batch
+    rows homogeneous, which the bulk INSERT requires.
+    """
+    payload: dict = {"business_name": lead.get("lead", "")}
+    for api_key, lead_key in [
+        ("website",  "website"),
+        ("maps_url", "maps_url"),
+        ("phone",    "phone"),
+        ("address",  "address"),
+        ("zip_code", "zip_code"),
+        ("city",     "city"),
+        ("province", "province"),
+    ]:
+        if value := lead.get(lead_key):
+            payload[api_key] = value
+    return payload
 
 
 def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
@@ -131,9 +140,9 @@ def run_search_job(job: dict) -> int:
     return total
 
 
-def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> None:
+def run_analysis_job(job: dict, idx: int = 0) -> None:
     """Analyze a single lead's website and generate its outreach message."""
-    counter = f" {idx}/{total}" if total else ""
+    counter = f" {idx}" if idx else ""
     print(f"\r[>] Analyzing{counter}", end="", flush=True)
     try:
         analysis = analyze({"lead": job["business_name"], "website": job["website"]})
@@ -197,11 +206,17 @@ def main() -> None:
     analysis_idx = 0
     analysis_total = 0
     was_analyzing = False
+
+    def _done_line() -> str:
+        skipped = analysis_total - analysis_idx
+        note = f", {skipped} skipped" if skipped > 0 else ""
+        return f"\r[+] Done ({analysis_idx} analyzed{note})" + " " * 10
+
     while True:
         try:
             if job := claim_next_search_job():
                 if was_analyzing:
-                    print(f"\r[+] Done ({analysis_idx} analyzed)" + " " * 10)
+                    print(_done_line())
                     was_analyzing = False
                 analysis_total = run_search_job(job)
                 analysis_idx = 0
@@ -209,10 +224,10 @@ def main() -> None:
             if job := claim_next_analysis_job():
                 analysis_idx += 1
                 was_analyzing = True
-                run_analysis_job(job, analysis_idx, analysis_total)
+                run_analysis_job(job, analysis_idx)
                 continue
             if was_analyzing:
-                print(f"\r[+] Done ({analysis_idx} analyzed)" + " " * 10)
+                print(_done_line())
                 was_analyzing = False
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 402:

@@ -18,11 +18,11 @@ class TestMapToApiShape:
         assert result["zip_code"] == "03201"
         assert result["maps_url"] == sample_lead["maps_url"]
 
-    def test_missing_fields_default_to_empty_string(self):
+    def test_missing_optional_fields_are_omitted(self):
         result = map_to_api_shape({})
         assert result["business_name"] == ""
-        assert result["website"] == ""
-        assert result["phone"] == ""
+        assert "website" not in result
+        assert "phone" not in result
 
     def test_lead_key_mapped_to_business_name(self):
         result = map_to_api_shape({"lead": "Mi Empresa"})
