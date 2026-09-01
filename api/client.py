@@ -24,7 +24,13 @@ def report_leads(search_id: str, leads: list[dict]) -> int:
         f"{API_BASE_URL}/api/scraper/jobs/{search_id}/leads",
         json={"leads": leads}, headers=_HEADERS, timeout=30,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        # raise_for_status() swallows the response body; include it so API error
+        # messages (validation details, 500 causes) reach the worker log.
+        raise requests.HTTPError(
+            f"POST /jobs/{search_id}/leads → {resp.status_code}: {resp.text}",
+            response=resp,
+        )
     return resp.json()["data"]["created"]
 
 
