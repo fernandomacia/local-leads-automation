@@ -165,6 +165,13 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
             return
 
         if not job.get("website"):
+            # Defensive, not reachable under the current API contract: a lead with no
+            # website is only claimable when it has a phone or an email (the API's
+            # Lead::hasContactChannel), and no-contact leads are failed at ingest time.
+            # This condition mirrors that definition exactly. Kept because without it
+            # such a lead would fall through to generate() and burn an LLM call producing
+            # a pitch with no way to deliver it; reporting an empty message instead
+            # settles the lead so it stops holding its parent search open.
             if not (job.get("phone") or job.get("email")):
                 report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
                 return
@@ -172,7 +179,13 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
             return
 
-        message = generate({**base_context, "has_website": True})
+        # has_website comes from the analysis, not the raw job: analyze() blanks
+        # "website" when the URL is a social profile, because a Facebook page is not a
+        # site. Reading job["website"] here would report has_website=True and push the
+        # generator into the "has a website" scenario, which pitches on SEO problems —
+        # of which there are none, since a social URL yields an empty analysis. The
+        # no-website scenario is the correct framing and the actual sales angle.
+        message = generate({**base_context, "has_website": bool(analysis.get("website"))})
         report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 402:
