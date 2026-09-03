@@ -14,7 +14,11 @@ import requests
 
 from bs4 import BeautifulSoup
 
-from scraper.cookie_detection import detect_cookie_compliance, detect_legal_pages
+from scraper.cookie_detection import (
+    detect_cookie_compliance,
+    detect_form_compliance,
+    detect_legal_pages,
+)
 from scraper.web_analyzer import (
     MAX_RESPONSE_BYTES,
     _best_email,
@@ -391,3 +395,49 @@ class TestDetectLegalPages:
         # the " | " separator between entries is what prevents it.
         html = '<a href="/a">Aviso</a><a href="/b">Legal</a><a href="/c">Privacidad</a>'
         assert "no_legal_notice" in detect_legal_pages(_parse(html))
+
+
+# ── detect_form_compliance ────────────────────────────────────────────────────
+
+_CONTACT_FIELDS = '<input type="text" name="nombre"><input type="email" name="email">'
+
+
+class TestDetectFormCompliance:
+    def test_contact_form_without_consent_is_reported(self):
+        html = f'<form>{_CONTACT_FIELDS}<input type="submit"></form>'
+        assert detect_form_compliance(_parse(html)) == ["form_without_consent"]
+
+    def test_consent_checkbox_clears_the_form(self):
+        html = f'<form>{_CONTACT_FIELDS}<input type="checkbox" name="acepto"></form>'
+        assert detect_form_compliance(_parse(html)) == []
+
+    def test_privacy_link_inside_form_clears_it(self):
+        html = f'<form>{_CONTACT_FIELDS}<a href="/politica-privacidad">Privacidad</a></form>'
+        assert detect_form_compliance(_parse(html)) == []
+
+    def test_privacy_link_matched_by_text_when_href_is_opaque(self):
+        html = f'<form>{_CONTACT_FIELDS}<a href="/p/9">Política de privacitat</a></form>'
+        assert detect_form_compliance(_parse(html)) == []
+
+    def test_search_box_is_not_a_contact_form(self):
+        # One text input plus a submit button: the reason for the two-field floor.
+        html = '<form><input type="text" name="s"><input type="submit" value="Buscar"></form>'
+        assert detect_form_compliance(_parse(html)) == []
+
+    def test_textarea_counts_towards_the_field_floor(self):
+        html = '<form><input type="text" name="nombre"><textarea name="mensaje"></textarea></form>'
+        assert detect_form_compliance(_parse(html)) == ["form_without_consent"]
+
+    def test_submit_and_hidden_inputs_do_not_count_as_fields(self):
+        html = ('<form><input type="text" name="s"><input type="hidden" name="tok">'
+                '<input type="submit"></form>')
+        assert detect_form_compliance(_parse(html)) == []
+
+    def test_page_with_no_form_reports_nothing(self):
+        html = "<html><body><h1>Inicio</h1></body></html>"
+        assert detect_form_compliance(_parse(html)) == []
+
+    def test_one_offending_form_among_several_is_enough(self):
+        html = (f'<form>{_CONTACT_FIELDS}<input type="checkbox"></form>'
+                f'<form>{_CONTACT_FIELDS}</form>')
+        assert detect_form_compliance(_parse(html)) == ["form_without_consent"]
