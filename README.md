@@ -81,15 +81,18 @@ Angular frontend — results are reported straight to the API via
 | `email` | Web | Contact email |
 | `instagram` … `tiktok` | Web | Social media profile URLs |
 | `seo_score` | Web | 0–100 (100 − 10 per issue found) |
-| `seo_issues` | Web | Pipe-separated detected issues (see below) |
+| `seo_issues` | Web | Issue key → Spanish label (see below) |
+| `compliance_issues` | Web | Legal compliance issue key → Spanish label (see below) |
 | `email_subject` | AI | Generated email subject line |
 | `email_body` | AI | Generated email body (ready to send) |
+| `phone_script` | AI | Generated phone script for the sales call |
 
 ### SEO issues detected
 
 | Issue | Description |
 |---|---|
 | `no_https` | Site not served over HTTPS |
+| `invalid_ssl` | SSL certificate expired or invalid (site loaded only with verification disabled) |
 | `no_title` | Missing `<title>` tag |
 | `no_meta_description` | Missing meta description |
 | `no_h1` / `multiple_h1` | Missing or duplicate H1 heading |
@@ -104,6 +107,21 @@ Angular frontend — results are reported straight to the API via
 | `no_sitemap` | No `/sitemap.xml` found |
 | `no_robots` | No `/robots.txt` found |
 
+### Legal compliance issues detected
+
+Reported separately from `seo_issues` and excluded from `seo_score`: these are
+unmet legal obligations, not quality signals. Detection is deliberately
+conservative — a false positive is told to a business owner as "you are breaking
+the law", so anything ambiguous resolves to compliant.
+
+| Issue | Description |
+|---|---|
+| `no_cookie_banner` | Loads trackers with no consent banner. Sites using only technical cookies are exempt and never reported |
+| `no_cookie_policy` | No link to a cookie policy page. A banner's own "Accept" anchor does not count |
+| `no_legal_notice` | No legal notice linked (LSSI). Matches Spanish and Valencian wordings |
+| `no_privacy_policy` | No privacy policy linked (GDPR) |
+| `form_without_consent` | A contact form collects personal data with no consent checkbox and no privacy link |
+
 ---
 
 ## Project Structure
@@ -113,6 +131,7 @@ worker.py                    # Daemon: polls SegurSEO-API job queues, drives scr
 scraper/
   maps_scraper.py            # Scrapes businesses from Google Maps
   web_analyzer.py            # CMS detection, contacts, SEO scoring
+  cookie_detection.py        # Cookie consent, legal texts, and form consent detection
 ai/
   message_generator.py       # Generates outreach emails via OpenRouter
 api/
