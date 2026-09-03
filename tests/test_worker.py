@@ -1,8 +1,12 @@
 """Tests for worker.py — pure mapping and routing logic, no network."""
 
+import io
+import sys
+from unittest.mock import patch
+
 import pytest
 
-from worker import _maps_issues, map_analysis_to_api_shape, map_to_api_shape
+from worker import _finish, _maps_issues, _progress, map_analysis_to_api_shape, map_to_api_shape
 
 
 # ── map_to_api_shape ──────────────────────────────────────────────────────────
@@ -123,3 +127,44 @@ class TestMapsIssues:
         for label in issues.values():
             assert isinstance(label, str)
             assert len(label) > 0
+
+
+# ── Terminal progress output ──────────────────────────────────────────────────
+
+def _capture(is_tty: bool, *calls) -> str:
+    """Run the given (fn, text) pairs against a stdout whose isatty() is fixed."""
+    buf = io.StringIO()
+    buf.isatty = lambda: is_tty
+    with patch.object(sys, "stdout", buf):
+        for fn, text in calls:
+            fn(text)
+    return buf.getvalue()
+
+
+class TestProgressOutput:
+    def test_progress_overwrites_in_place_on_a_terminal(self):
+        out = _capture(True, (_progress, "[>] Analyzing 3"))
+        assert out == "\r[>] Analyzing 3"
+
+    def test_progress_is_silent_when_not_a_terminal(self):
+        # journald does not honour \r and would glue an unterminated write onto
+        # the next log line, so the counter is dropped rather than fragmented.
+        assert _capture(False, (_progress, "[>] Analyzing 3")) == ""
+
+    def test_finish_clears_the_counter_on_a_terminal(self):
+        out = _capture(True, (_finish, "[+] Done (3 analyzed)"))
+        assert out.startswith("\r[+] Done (3 analyzed)")
+        assert out.endswith("\n")
+
+    def test_finish_writes_one_clean_line_when_not_a_terminal(self):
+        assert _capture(False, (_finish, "[+] Done (3 analyzed)")) == "[+] Done (3 analyzed)\n"
+
+    def test_piped_run_emits_only_the_final_line(self):
+        out = _capture(
+            False,
+            (_progress, "[>] Analyzing 1"),
+            (_progress, "[>] Analyzing 2"),
+            (_finish, "[+] Done (2 analyzed)"),
+        )
+        assert out == "[+] Done (2 analyzed)\n"
+        assert "\r" not in out
