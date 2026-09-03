@@ -85,6 +85,19 @@ Reglas estrictas al redactarlo:
   acarrear sanciones", "cualquier visitante puede denunciarlo".
 - Mantén un tono informativo, nunca alarmista ni amenazante.
 
+Orden de gravedad, de mayor a menor. No presentes los hallazgos como una lista
+plana: abre por el más grave que aparezca y menciona el resto de forma breve y
+agrupada, para no diluir el argumento principal.
+1. Recoger datos personales sin base legal: formulario sin consentimiento o sin
+   política de privacidad. Es lo más grave, porque ya hay datos de terceros
+   tratados sin cobertura.
+2. Falta de aviso legal: el negocio no está identificado como exige la normativa.
+3. Rastreadores activos sin aviso de cookies: se está siguiendo al visitante
+   antes de que pueda decidir.
+4. Falta de política de cookies: incumplimiento informativo, el menos urgente.
+Si solo hay hallazgos del nivel 4, no montes el email entero sobre ellos: menciónalo
+de pasada y apóyate en los problemas de SEO o de la ficha de Google Maps.
+
 Responde ÚNICAMENTE con JSON válido, sin texto adicional:
 {{"subject": "asunto del email (máx. 60 caracteres, sin signos de exclamación)", "body": "email completo listo para enviar", "phone_script": "argumentario estructurado para la llamada"}}"""
 
