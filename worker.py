@@ -7,6 +7,7 @@ daemon, driven entirely by the API.
 
 import logging
 import random
+import sys
 import time
 
 import requests
@@ -31,6 +32,23 @@ logger = logging.getLogger(__name__)
 _SOCIAL_FIELDS = tuple(SOCIAL_DOMAINS.keys())
 
 _MAPS_FIELD_KEYS = {"no_website": "website", "no_phone": "phone", "no_address": "address"}
+
+
+def _progress(text: str) -> None:
+    """Overwrite the current terminal line with a progress update.
+
+    Suppressed entirely when stdout is not a terminal. Under systemd the stream
+    is a pipe to journald, which does not honour the carriage return and treats
+    an unterminated write as the start of the next line — so the counter would
+    arrive as fragments glued onto whatever gets logged next.
+    """
+    if sys.stdout.isatty():
+        print(f"\r{text}", end="", flush=True)
+
+
+def _finish(text: str) -> None:
+    """Print a final line, clearing the in-place counter it replaces on a terminal."""
+    print(f"\r{text}" + " " * 10 if sys.stdout.isatty() else text)
 
 
 def _maps_issues(job: dict) -> dict[str, str]:
@@ -147,7 +165,7 @@ def run_search_job(job: dict) -> int:
 def run_analysis_job(job: dict, idx: int = 0) -> None:
     """Analyze a single lead's website and generate its outreach message."""
     counter = f" {idx}" if idx else ""
-    print(f"\r[>] Analyzing{counter}", end="", flush=True)
+    _progress(f"[>] Analyzing{counter}")
     try:
         analysis = analyze({"lead": job["business_name"], "website": job["website"]})
 
@@ -227,13 +245,13 @@ def main() -> None:
     def _done_line() -> str:
         skipped = analysis_total - analysis_idx
         note = f", {skipped} skipped" if skipped > 0 else ""
-        return f"\r[+] Done ({analysis_idx} analyzed{note})" + " " * 10
+        return f"[+] Done ({analysis_idx} analyzed{note})"
 
     while True:
         try:
             if job := claim_next_search_job():
                 if was_analyzing:
-                    print(_done_line())
+                    _finish(_done_line())
                     was_analyzing = False
                 analysis_total = run_search_job(job)
                 analysis_idx = 0
@@ -244,7 +262,7 @@ def main() -> None:
                 run_analysis_job(job, analysis_idx)
                 continue
             if was_analyzing:
-                print(_done_line())
+                _finish(_done_line())
                 was_analyzing = False
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 402:
