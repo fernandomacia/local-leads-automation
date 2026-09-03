@@ -78,6 +78,10 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
 
     if analysis.get("seo_score") is not None:
         payload["seo_score"] = analysis["seo_score"]
+        # Rides along with the score, {} included: only a page we actually fetched can be
+        # called compliant. Gating on the score keeps NULL exclusive to "not analyzed" —
+        # sending {} unconditionally would make an unreachable site read as clean.
+        payload["compliance_issues"] = analysis.get("compliance_issues", {})
     if analysis.get("seo_issues"):
         payload["seo_issues"] = analysis["seo_issues"]
 
