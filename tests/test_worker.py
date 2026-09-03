@@ -58,6 +58,23 @@ class TestMapAnalysisToApiShape:
         result = map_analysis_to_api_shape({"seo_score": None}, {})
         assert "seo_score" not in result
 
+    def test_compliance_issues_included_when_analyzed(self):
+        analysis = {"seo_score": 70, "compliance_issues": {"no_cookie_banner": "Sin aviso"}}
+        result = map_analysis_to_api_shape(analysis, {})
+        assert result["compliance_issues"] == {"no_cookie_banner": "Sin aviso"}
+
+    def test_empty_compliance_issues_sent_not_omitted(self):
+        # {} means "analyzed and clean" — omitting it would leave NULL, which the
+        # platform renders as "not analyzed"
+        result = map_analysis_to_api_shape({"seo_score": 90, "compliance_issues": {}}, {})
+        assert result["compliance_issues"] == {}
+
+    def test_compliance_issues_omitted_when_site_not_analyzed(self):
+        # Unreachable/social/no-website leads carry seo_score None; claiming {} there
+        # would render an unchecked site as compliant
+        result = map_analysis_to_api_shape({"seo_score": None, "compliance_issues": {}}, {})
+        assert "compliance_issues" not in result
+
     def test_social_networks_grouped_and_filtered(self):
         analysis = {
             "instagram": "https://instagram.com/test",
