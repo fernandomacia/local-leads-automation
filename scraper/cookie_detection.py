@@ -59,6 +59,31 @@ _CMP_DOM_MARKERS = (
     "segurseo-cookie-banner",    # our own theme — see the WordPress section
 )
 
+# Third-party resources that set non-essential cookies. Their presence is what
+# creates the consent obligation — a site with none of these needs no banner.
+_TRACKERS = (
+    # Analytics
+    "gtag(", "googletagmanager.com", "google-analytics.com", "_gaq",
+    "clarity.ms", "hotjar.com", "hj(", "matomo.js", "piwik.js",
+    # Advertising and social pixels
+    "connect.facebook.net", "fbq(", "doubleclick.net", "googlesyndication.com",
+    "googleadservices.com", "snap.licdn.com", "analytics.tiktok.com", "ads-twitter.com",
+    # Embeds that set cookies on load
+    "youtube.com/embed", "player.vimeo.com", "google.com/maps/embed",
+    "addthis.com", "sharethis.com", "disqus.com",
+)
+
+# Deliberately NOT trackers:
+# - plausible.io / usefathom.com — cookieless by design, no consent required
+# - youtube-nocookie.com — the privacy-enhanced embed, which is the correct fix
+# - fonts.googleapis.com — legally contested and present on nearly every site;
+#   including it would flag almost everyone and destroy the check's credibility
+
+# A hand-rolled banner is identified by a cookie word and a banner word sharing
+# one id or class, so an unrelated ".cookie-recipe" is never mistaken for consent UI.
+_GENERIC_BANNER_WORDS = ("cookie", "galleta")
+_GENERIC_BANNER_CONTEXT = ("banner", "consent", "notice", "aviso", "bar", "popup", "modal", "gdpr", "rgpd", "lopd")
+
 
 def _has_cmp(html_lower: str, soup) -> bool:
     """True when any consent-platform loader or container is present."""
@@ -85,18 +110,85 @@ def _has_cmp(html_lower: str, soup) -> bool:
     return False
 
 
+def _has_generic_banner(soup) -> bool:
+    """Catch hand-rolled banners that use no known consent platform.
+
+    Requires both a cookie word and a banner-ish word in the same id or class, so
+    an unrelated ``.cookie-recipe`` on a bakery site is not mistaken for consent UI.
+    """
+    for el in soup.find_all(attrs={"id": True}):
+        token = el["id"].lower()
+        if any(w in token for w in _GENERIC_BANNER_WORDS) and any(c in token for c in _GENERIC_BANNER_CONTEXT):
+            return True
+
+    for el in soup.find_all(attrs={"class": True}):
+        token = " ".join(el["class"]).lower()
+        if any(w in token for w in _GENERIC_BANNER_WORDS) and any(c in token for c in _GENERIC_BANNER_CONTEXT):
+            return True
+
+    return False
+
+
+def _loads_trackers(html_lower: str) -> bool:
+    """True when the page loads a resource that sets non-essential cookies."""
+    return any(sig in html_lower for sig in _TRACKERS)
+
+
 def _has_cookie_policy(soup) -> bool:
-    """True when the page links to something that reads like a cookie policy."""
+    """True when the page links to an actual cookie policy page.
+
+    Requires a navigable href: consent banners render their own "Aceptar cookies"
+    and "Configurar cookies" controls as anchors, and counting those would report a
+    policy page that does not exist.
+    """
     for link in soup.find_all("a", href=True):
-        text = link.get_text(strip=True).lower()
-        href = link["href"].lower()
-        if "cookie" in text or "cookie" in href:
+        href = link["href"].strip().lower()
+        if href == "" or href.startswith(("#", "javascript:", "mailto:")):
+            continue
+        if "cookie" in href or "cookie" in link.get_text(strip=True).lower():
             return True
     return False
 
 
+_LEGAL_PAGE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "no_legal_notice": (
+        "aviso legal", "avis legal", "nota legal",
+        "/aviso-legal", "/avis-legal", "/legal",
+    ),
+    "no_privacy_policy": (
+        "privacidad", "privacitat", "proteccion de datos", "protecció de dades",
+        "/privacidad", "/privacy", "/proteccion-datos",
+    ),
+}
+
+
+def detect_legal_pages(soup) -> list[str]:
+    """Return issue keys for mandatory legal pages with no link on the page.
+
+    Matches link text and href against Spanish and Valencian variants — a bilingual
+    footer in Elche or Alicante would otherwise be reported as non-compliant while
+    having every text published.
+    """
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip().lower()
+        if href.startswith(("#", "javascript:", "mailto:")):
+            continue
+        links.append(f"{a.get_text(strip=True).lower()} {href}")
+
+    haystack = " | ".join(links)
+
+    return [key for key, patterns in _LEGAL_PAGE_PATTERNS.items()
+            if not any(p in haystack for p in patterns)]
+
+
 def detect_cookie_compliance(html: str, soup) -> list[str]:
-    """Return compliance issue keys for the cookie obligations we can see statically.
+    """Return cookie-related compliance issues visible in static HTML.
+
+    Reports a missing banner only when the site actually loads non-essential
+    cookies. A site with no trackers has no consent obligation, so flagging it
+    would tell a compliant business it is breaking the law — the most expensive
+    mistake this analyser can make, because it is told to them on a sales call.
 
     Returns:
         A list containing zero or more of ``no_cookie_banner`` and
@@ -105,8 +197,11 @@ def detect_cookie_compliance(html: str, soup) -> list[str]:
     html_lower = html.lower()
     issues = []
 
-    if not _has_cmp(html_lower, soup):
+    has_consent_ui = _has_cmp(html_lower, soup) or _has_generic_banner(soup)
+
+    if _loads_trackers(html_lower) and not has_consent_ui:
         issues.append("no_cookie_banner")
+
     if not _has_cookie_policy(soup):
         issues.append("no_cookie_policy")
 
