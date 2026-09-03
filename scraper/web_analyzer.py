@@ -17,7 +17,11 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import SOCIAL_DOMAINS
-from scraper.cookie_detection import detect_cookie_compliance, detect_legal_pages
+from scraper.cookie_detection import (
+    detect_cookie_compliance,
+    detect_form_compliance,
+    detect_legal_pages,
+)
 
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
@@ -228,6 +232,7 @@ COMPLIANCE_ISSUE_LABELS: dict[str, str] = {
     "no_cookie_policy":  "Sin página de política de cookies",
     "no_legal_notice":   "Sin aviso legal (obligatorio por la LSSI)",
     "no_privacy_policy": "Sin política de privacidad (RGPD)",
+    "form_without_consent": "Formulario de contacto sin consentimiento expreso (RGPD)",
 }
 
 SEO_ISSUE_LABELS: dict[str, str] = {
@@ -362,7 +367,11 @@ def analyze(lead: dict) -> dict:
     html, soup, final_url, invalid_ssl = result
     cms = _detect_cms(html)
     seo_score, seo_issues = _score_seo(soup, final_url, invalid_ssl=invalid_ssl)
-    compliance_issues = detect_cookie_compliance(html, soup) + detect_legal_pages(soup)
+    compliance_issues = (
+        detect_cookie_compliance(html, soup)
+        + detect_legal_pages(soup)
+        + detect_form_compliance(soup)
+    )
 
     return {
         **lead,
