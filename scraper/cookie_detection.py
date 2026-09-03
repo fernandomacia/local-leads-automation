@@ -182,6 +182,41 @@ def detect_legal_pages(soup) -> list[str]:
             if not any(p in haystack for p in patterns)]
 
 
+# Input types that collect personal data. Submit, hidden, button and the rest are
+# excluded so they never push a form over the field threshold below.
+_DATA_INPUT_TYPES = (None, "text", "email", "tel")
+
+# A form must collect at least this many fields to read as a contact form. A site
+# search box is a single text input and would otherwise be reported as a form
+# gathering personal data without consent.
+_MIN_CONTACT_FIELDS = 2
+
+
+def _form_lacks_consent(soup) -> bool:
+    """True when a contact form collects data with no consent checkbox or privacy link."""
+    for form in soup.find_all("form"):
+        inputs = form.find_all(("input", "textarea"))
+        field_count = sum(1 for i in inputs if i.get("type") in _DATA_INPUT_TYPES)
+        if field_count < _MIN_CONTACT_FIELDS:
+            continue
+
+        has_checkbox = any(i.get("type") == "checkbox" for i in inputs)
+        has_privacy_link = any(
+            "privac" in a["href"].lower() or "privac" in a.get_text(strip=True).lower()
+            for a in form.find_all("a", href=True)
+        )
+
+        if not has_checkbox and not has_privacy_link:
+            return True
+
+    return False
+
+
+def detect_form_compliance(soup) -> list[str]:
+    """Return issue keys for contact forms that gather personal data without consent."""
+    return ["form_without_consent"] if _form_lacks_consent(soup) else []
+
+
 def detect_cookie_compliance(html: str, soup) -> list[str]:
     """Return cookie-related compliance issues visible in static HTML.
 
