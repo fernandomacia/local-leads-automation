@@ -73,6 +73,18 @@ NORMAS DEL ARGUMENTARIO:
 - Al menos 2 objeciones frecuentes con su respuesta concisa
 - Sin emojis, sin exclamaciones
 
+CUMPLIMIENTO LEGAL:
+Si recibes `problemas_legales`, trátalo como el argumento de MAYOR urgencia, por
+encima de cualquier problema de SEO: es una obligación legal incumplida, no una
+oportunidad de mejora.
+
+Reglas estrictas al redactarlo:
+- NUNCA menciones importes de multas, ni rangos, ni cifras de ningún tipo.
+- NUNCA cites artículos, leyes concretas ni resoluciones.
+- Habla del riesgo en términos generales: "es una obligación legal", "puede
+  acarrear sanciones", "cualquier visitante puede denunciarlo".
+- Mantén un tono informativo, nunca alarmista ni amenazante.
+
 Responde ÚNICAMENTE con JSON válido, sin texto adicional:
 {{"subject": "asunto del email (máx. 60 caracteres, sin signos de exclamación)", "body": "email completo listo para enviar", "phone_script": "argumentario estructurado para la llamada"}}"""
 
@@ -83,6 +95,8 @@ def _build_prompt(lead: dict) -> str:
     seo_problems = list(seo_issues.values()) if isinstance(seo_issues, dict) else []
     maps_issues = lead.get("maps_issues") or {}
     maps_problems = list(maps_issues.values()) if isinstance(maps_issues, dict) else []
+    compliance_issues = lead.get("compliance_issues") or {}
+    compliance_problems = list(compliance_issues.values()) if isinstance(compliance_issues, dict) else []
     has_website = lead.get("has_website", bool(lead.get("website")))
 
     data = {
@@ -95,6 +109,7 @@ def _build_prompt(lead: dict) -> str:
         "puntuacion_seo": lead.get("seo_score"),
         "problemas_seo": seo_problems,
         "problemas_google_maps": maps_problems,
+        "problemas_legales": compliance_problems,
         "email_contacto": lead.get("email", "") or "",
         "redes_sociales": social,
     }
