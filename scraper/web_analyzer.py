@@ -17,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import SOCIAL_DOMAINS
+from scraper.cookie_detection import detect_cookie_compliance
 
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
@@ -222,6 +223,11 @@ def _url_exists(url: str) -> bool:
         return False
 
 
+COMPLIANCE_ISSUE_LABELS: dict[str, str] = {
+    "no_cookie_banner": "Sin aviso ni gestor de cookies (RGPD/LSSI)",
+    "no_cookie_policy": "Sin página de política de cookies",
+}
+
 SEO_ISSUE_LABELS: dict[str, str] = {
     "no_https":           "Sin certificado SSL (web no segura)",
     "invalid_ssl":        "Certificado SSL caducado o no válido",
@@ -311,6 +317,7 @@ _EMPTY_ANALYSIS: dict = {
     "cms": "", "email": "",
     **{p: "" for p in SOCIAL_DOMAINS},
     "seo_score": None, "seo_issues": {},
+    "compliance_issues": {},
 }
 
 # All fields that constitute a reachable contact channel (phone is scraped from Maps but not
@@ -353,6 +360,7 @@ def analyze(lead: dict) -> dict:
     html, soup, final_url, invalid_ssl = result
     cms = _detect_cms(html)
     seo_score, seo_issues = _score_seo(soup, final_url, invalid_ssl=invalid_ssl)
+    compliance_issues = detect_cookie_compliance(html, soup)
 
     return {
         **lead,
@@ -361,4 +369,5 @@ def analyze(lead: dict) -> dict:
         **_extract_socials(soup),
         "seo_score": seo_score,
         "seo_issues": {k: SEO_ISSUE_LABELS.get(k, k) for k in seo_issues},
+        "compliance_issues": {k: COMPLIANCE_ISSUE_LABELS.get(k, k) for k in compliance_issues},
     }
