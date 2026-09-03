@@ -12,6 +12,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from bs4 import BeautifulSoup
+
+from scraper.cookie_detection import detect_cookie_compliance
 from scraper.web_analyzer import (
     MAX_RESPONSE_BYTES,
     _best_email,
@@ -240,3 +243,66 @@ class TestBestEmail:
 
     def test_empty_list_returns_empty(self):
         assert _best_email([], "miempresa.es") == ""
+
+
+# ── detect_cookie_compliance ──────────────────────────────────────────────────
+
+def _parse(html: str):
+    return BeautifulSoup(html, "html.parser")
+
+
+class TestDetectCookieCompliance:
+    @pytest.mark.parametrize("html", [
+        '<script src="https://consent.cookiebot.com/uc.js"></script>',
+        '<script src="/wp-content/plugins/complianz-gdpr/cookiebanner/js/complianz.min.js"></script>',
+        '<div id="cmplz-cookiebanner-container"></div>',
+        '<div class="cky-consent-container"></div>',
+        '<script type="text/plain" data-cookieconsent="statistics"></script>',
+        '<div id="segurseo-cookie-banner"></div>',
+    ])
+    def test_detects_common_cmps(self, html):
+        soup = _parse(html)
+        assert "no_cookie_banner" not in detect_cookie_compliance(html, soup)
+
+    def test_reports_missing_banner_on_bare_page(self):
+        html = "<html><body><h1>Despacho</h1></body></html>"
+        assert "no_cookie_banner" in detect_cookie_compliance(html, _parse(html))
+
+    def test_detects_cookie_policy_link_by_text(self):
+        html = '<a href="/legal">Política de cookies</a>'
+        assert "no_cookie_policy" not in detect_cookie_compliance(html, _parse(html))
+
+    def test_detects_cookie_policy_link_by_href(self):
+        html = '<a href="/politica-cookies">Aviso legal</a>'
+        assert "no_cookie_policy" not in detect_cookie_compliance(html, _parse(html))
+
+    def test_reports_missing_policy_on_bare_page(self):
+        html = "<html><body><h1>Inicio</h1></body></html>"
+        assert "no_cookie_policy" in detect_cookie_compliance(html, _parse(html))
+
+    def test_complianz_type_text_plain_with_data_cmplz_attribute(self):
+        # Complianz blocks third-party scripts by rewriting their type to text/plain
+        # and adding data-cmplz-* attributes — a strong signal even without the CDN URL.
+        html = '<script type="text/plain" data-cmplz-src="https://example.com/tracker.js"></script>'
+        soup = _parse(html)
+        assert "no_cookie_banner" not in detect_cookie_compliance(html, soup)
+
+    def test_no_false_positive_on_realistic_wordpress_homepage(self):
+        # Representative HTML of a WordPress site with Complianz active.
+        # Ensures a legitimate compliant site is not flagged.
+        html = """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Mi Empresa</title>
+<link rel="stylesheet" href="/wp-content/plugins/complianz-gdpr/cookiebanner/css/cookiebanner.min.css">
+</head>
+<body>
+<nav><a href="/politica-cookies">Política de cookies</a></nav>
+<div id="cmplz-cookiebanner-container" class="cmplz-cookiebanner"></div>
+<h1>Bienvenidos</h1>
+</body>
+</html>"""
+        soup = _parse(html)
+        issues = detect_cookie_compliance(html, soup)
+        assert issues == [], f"False positive on compliant site: {issues}"
