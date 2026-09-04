@@ -15,6 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from scraper.cookie_detection import (
+    _has_cmp,
     detect_cookie_compliance,
     detect_form_compliance,
     detect_legal_pages,
@@ -350,6 +351,77 @@ class TestDetectCookieCompliance:
         soup = _parse(html)
         issues = detect_cookie_compliance(html, soup)
         assert issues == [], f"False positive on compliant site: {issues}"
+
+    # Real markup captured from a live SegurSEO theme install (WP 7.1), not a
+    # hand-typed approximation, so the fixture reflects what the theme actually
+    # renders rather than what we assume it renders.
+    SEGURSEO_THEME_BANNER = """<div id="segurseo-cookie-consent" class="segurseo-cookie-consent segurseo-cookie-banner" hidden>
+
+		<div class="segurseo-cookie-consent__bar">
+			<p class="segurseo-cookie-consent__text">
+				Utilizamos cookies propias y de terceros en SegurSEO para analizar el uso de la web y mejorar tu experiencia. Puedes aceptarlas, rechazarlas o configurar tus preferencias. <a href="http://localhost/politica-de-cookies/">Más información</a>			</p>
+			<div class="segurseo-cookie-consent__actions">
+				<button type="button" class="segurseo-cookie-consent__btn segurseo-cookie-consent__btn--ghost" data-cookie-action="configure">Configurar</button>
+				<button type="button" class="segurseo-cookie-consent__btn segurseo-cookie-consent__btn--ghost" data-cookie-action="reject">Rechazar</button>
+				<button type="button" class="segurseo-cookie-consent__btn segurseo-cookie-consent__btn--accept" data-cookie-action="accept-all">Aceptar todas</button>
+			</div>
+		</div>
+
+		<div class="segurseo-cookie-consent__panel" hidden>
+			<h2 class="segurseo-cookie-consent__panel-title">Preferencias de cookies</h2>
+
+			<div class="segurseo-cookie-consent__category">
+				<div class="segurseo-cookie-consent__category-header">
+					<span class="segurseo-cookie-consent__category-title">Técnicas</span>
+					<span class="segurseo-cookie-consent__always-on">Siempre activas</span>
+				</div>
+				<p class="segurseo-cookie-consent__category-desc">Necesarias para el funcionamiento básico de la web. Se activan sin necesidad de tu consentimiento.</p>
+			</div>
+
+			<div class="segurseo-cookie-consent__category">
+				<div class="segurseo-cookie-consent__category-header">
+					<span class="segurseo-cookie-consent__category-title">Analíticas</span>
+					<label class="segurseo-cookie-consent__toggle">
+						<input type="checkbox" id="segurseo-cookie-cat-analytics">
+						<span class="segurseo-cookie-consent__toggle-track"></span>
+					</label>
+				</div>
+				<p class="segurseo-cookie-consent__category-desc">Nos permiten conocer cómo interactúan los visitantes con la web para optimizar tu experiencia.</p>
+			</div>
+
+			<div class="segurseo-cookie-consent__category">
+				<div class="segurseo-cookie-consent__category-header">
+					<span class="segurseo-cookie-consent__category-title">Marketing</span>
+					<label class="segurseo-cookie-consent__toggle">
+						<input type="checkbox" id="segurseo-cookie-cat-marketing">
+						<span class="segurseo-cookie-consent__toggle-track"></span>
+					</label>
+				</div>
+				<p class="segurseo-cookie-consent__category-desc">Usadas para mostrarte publicidad relevante y medir el rendimiento de nuestras campañas.</p>
+			</div>
+
+			<div class="segurseo-cookie-consent__actions">
+				<button type="button" class="segurseo-cookie-consent__btn segurseo-cookie-consent__btn--ghost" data-cookie-action="reject-all">Rechazar todas</button>
+				<button type="button" class="segurseo-cookie-consent__btn segurseo-cookie-consent__btn--accept" data-cookie-action="save">Guardar preferencias</button>
+			</div>
+		</div>
+
+	</div>"""
+
+    def test_segurseo_theme_marker_matches_real_output(self):
+        # Asserts _has_cmp directly rather than going through
+        # detect_cookie_compliance: that path also consults _has_generic_banner,
+        # which matches this markup on its own via the segurseo-cookie-consent id
+        # and would keep the assertion green with a broken _CMP_DOM_MARKERS entry.
+        # Only the narrow call pins the marker against the theme's real output.
+        html = _TRACKER + self.SEGURSEO_THEME_BANNER
+        assert _has_cmp(html.lower(), _parse(html))
+
+    def test_real_segurseo_theme_output_is_not_reported(self):
+        # End-to-end companion to the above: our own client sites must never be
+        # reported as having no cookie banner, by whichever matcher gets there.
+        html = _TRACKER + self.SEGURSEO_THEME_BANNER
+        assert "no_cookie_banner" not in detect_cookie_compliance(html, _parse(html))
 
 
 # ── detect_legal_pages ────────────────────────────────────────────────────────
