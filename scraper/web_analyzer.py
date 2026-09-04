@@ -227,6 +227,11 @@ def _url_exists(url: str) -> bool:
         return False
 
 
+# Adding a key here? The platform renders these labels as they arrive, so the lead card
+# and the list column pick it up with no frontend change. The list *filter* is the
+# exception: its dropdown must know the keys before loading data, so mirror the new key
+# in COMPLIANCE_FILTER_OPTIONS (SegurSEO-Platform, src/app/features/leads/utils.ts) or it
+# won't be filterable.
 COMPLIANCE_ISSUE_LABELS: dict[str, str] = {
     "no_cookie_banner":  "Sin aviso ni gestor de cookies (RGPD/LSSI)",
     "no_cookie_policy":  "Sin página de política de cookies",
