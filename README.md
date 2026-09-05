@@ -83,6 +83,7 @@ Angular frontend — results are reported straight to the API via
 | `seo_score` | Web | 0–100 (100 − 10 per issue found) |
 | `seo_issues` | Web | Issue key → Spanish label (see below) |
 | `compliance_issues` | Web | Legal compliance issue key → Spanish label (see below) |
+| `maps_issues` | Maps | Listing gap key → Spanish label (see below) |
 | `email_subject` | AI | Generated email subject line |
 | `email_body` | AI | Generated email body (ready to send) |
 | `phone_script` | AI | Generated phone script for the sales call |
@@ -121,6 +122,18 @@ the law", so anything ambiguous resolves to compliant.
 | `no_legal_notice` | No legal notice linked (LSSI). Matches Spanish and Valencian wordings |
 | `no_privacy_policy` | No privacy policy linked (GDPR) |
 | `form_without_consent` | A contact form collects personal data with no consent checkbox and no privacy link |
+
+### Google Maps listing issues detected
+
+Derived from the Maps listing itself, not from fetching the website, so they are
+known even when the site is unreachable. An empty `{}` means the listing is
+complete — unlike NULL, which means the worker never processed the lead.
+
+| Issue | Description |
+|---|---|
+| `no_website` | The Maps listing has no website |
+| `no_phone` | The Maps listing has no phone number |
+| `no_address` | The Maps listing has no street address |
 
 ---
 
