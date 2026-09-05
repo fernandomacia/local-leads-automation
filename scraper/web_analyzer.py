@@ -65,6 +65,12 @@ _EMAIL_NOISE_DOMAINS = frozenset({
 _FAKE_TLD_RE = re.compile(r"\.(png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot)$", re.I)
 
 
+def _is_own_domain(email: str, site_domain: str) -> bool:
+    """True when the address belongs to the site's own domain or a subdomain of it."""
+    domain = email.split("@")[-1]
+    return bool(site_domain) and (domain == site_domain or domain.endswith("." + site_domain))
+
+
 def _best_email(emails: list[str], site_domain: str) -> str:
     """Return the most relevant email from candidates, preferring the site's own domain.
 
@@ -82,8 +88,7 @@ def _best_email(emails: list[str], site_domain: str) -> str:
     clean = [e for e in emails if not _is_noise(e)]
     if not clean:
         return ""
-    own = [e for e in clean if e.split("@")[-1] == site_domain
-           or e.split("@")[-1].endswith("." + site_domain)]
+    own = [e for e in clean if _is_own_domain(e, site_domain)]
     return (own or clean)[0]
 
 
@@ -172,14 +177,29 @@ def _detect_cms(html: str) -> str:
     return "unknown"
 
 
-def _extract_email(soup: BeautifulSoup, base_url: str) -> str:
+def _extract_email(soup: BeautifulSoup, base_url: str) -> tuple[str, list[BeautifulSoup]]:
     """Find an email address on the page, falling back to common contact sub-pages.
 
     Collects all mailto links (higher signal) and regex matches, then picks the
     best via _best_email — preferring addresses on the site's own domain over
     agency or tool addresses that appear first in the markup.
+
+    An own-domain address is treated as certain and ends the search. Anything else
+    is a weak answer — a homepage footer often carries only the web agency's own
+    address — so the contact sub-pages are still checked, and candidates from every
+    page fetched are ranked together rather than page by page. Without this, the
+    agency address found first would be stored as the business's own while the real
+    one sat one page away.
+
+    Returns:
+        ``(email, contact_soups)``. contact_soups holds the sub-pages this call
+        actually fetched, handed back so the caller can inspect them without
+        paying for the requests again — the contact form usually lives there
+        rather than on the homepage. It is empty whenever the homepage already
+        yielded an own-domain address, because no sub-page is requested then.
     """
     site_domain = (urlparse(base_url).hostname or "").removeprefix("www.")
+    contact_soups: list[BeautifulSoup] = []
 
     def _candidates(s: BeautifulSoup) -> list[str]:
         mailtos = [
@@ -188,20 +208,23 @@ def _extract_email(soup: BeautifulSoup, base_url: str) -> str:
         ]
         return mailtos + [e.lower() for e in _EMAIL_RE.findall(s.get_text())]
 
-    email = _best_email(_candidates(soup), site_domain)
-    if email:
-        return email
+    seen = _candidates(soup)
+    email = _best_email(seen, site_domain)
+    if email and _is_own_domain(email, site_domain):
+        return email, contact_soups
 
     for path in _CONTACT_PATHS:
         result = _fetch(urljoin(base_url, path))
         if not result:
             continue
         _, contact_soup, _, _ = result
-        email = _best_email(_candidates(contact_soup), site_domain)
-        if email:
-            return email
+        contact_soups.append(contact_soup)
+        seen += _candidates(contact_soup)
+        email = _best_email(seen, site_domain)
+        if email and _is_own_domain(email, site_domain):
+            return email, contact_soups
 
-    return ""
+    return _best_email(seen, site_domain), contact_soups
 
 
 def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
@@ -372,16 +395,20 @@ def analyze(lead: dict) -> dict:
     html, soup, final_url, invalid_ssl = result
     cms = _detect_cms(html)
     seo_score, seo_issues = _score_seo(soup, final_url, invalid_ssl=invalid_ssl)
+    # Contact sub-pages fetched while looking for the email are reused for the form
+    # check — the contact form rarely sits on the homepage, and this costs no extra
+    # request. Legal links live in the footer of every page, so those need no reuse.
+    email, contact_soups = _extract_email(soup, final_url)
     compliance_issues = (
         detect_cookie_compliance(html, soup)
         + detect_legal_pages(soup)
-        + detect_form_compliance(soup)
+        + detect_form_compliance(soup, *contact_soups)
     )
 
     return {
         **lead,
         "cms": cms,
-        "email": _extract_email(soup, final_url),
+        "email": email,
         **_extract_socials(soup),
         "seo_score": seo_score,
         "seo_issues": {k: SEO_ISSUE_LABELS.get(k, k) for k in seo_issues},

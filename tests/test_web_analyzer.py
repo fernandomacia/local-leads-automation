@@ -22,7 +22,9 @@ from scraper.cookie_detection import (
 )
 from scraper.web_analyzer import (
     MAX_RESPONSE_BYTES,
+    _CONTACT_PATHS,
     _best_email,
+    _extract_email,
     _fetch,
     _host_ok,
     _is_public_host,
@@ -213,6 +215,57 @@ class TestUrlExists:
         with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.head", side_effect=requests.Timeout):
             assert _url_exists("https://example.com/sitemap.xml") is False
+
+
+# ── _extract_email: contact-soup reuse ────────────────────────────────────────
+
+class TestExtractEmailContactSoups:
+    def test_own_domain_email_on_the_homepage_ends_the_search(self):
+        home = BeautifulSoup('<a href="mailto:info@miempresa.es">Correo</a>', "html.parser")
+        with patch("scraper.web_analyzer._fetch") as mock_fetch:
+            email, soups = _extract_email(home, "https://miempresa.es")
+        assert email == "info@miempresa.es"
+        assert soups == []
+        mock_fetch.assert_not_called()
+
+    def test_foreign_domain_on_the_homepage_does_not_end_the_search(self):
+        # A footer carrying only the web agency's address is a weak answer: the
+        # business's real address is usually on /contacto.
+        home = BeautifulSoup('<a href="mailto:hola@estudiodiseno.com">Escríbenos</a>', "html.parser")
+        contact = BeautifulSoup('<a href="mailto:info@miempresa.es">Correo</a>', "html.parser")
+        with patch("scraper.web_analyzer._fetch",
+                   return_value=("<html></html>", contact, "https://miempresa.es/contacto", False)):
+            email, soups = _extract_email(home, "https://miempresa.es")
+        assert email == "info@miempresa.es"
+        assert soups != []
+
+    def test_foreign_domain_kept_when_no_better_address_exists(self):
+        # Still better than nothing once every contact page has been checked.
+        home = BeautifulSoup('<a href="mailto:hola@estudiodiseno.com">Escríbenos</a>', "html.parser")
+        empty = BeautifulSoup("<html><body>Nada</body></html>", "html.parser")
+        with patch("scraper.web_analyzer._fetch",
+                   return_value=("<html></html>", empty, "https://miempresa.es/contacto", False)):
+            email, _ = _extract_email(home, "https://miempresa.es")
+        assert email == "hola@estudiodiseno.com"
+
+    def test_fetched_subpages_are_handed_back_for_reuse(self):
+        home = BeautifulSoup("<html><body>Nada</body></html>", "html.parser")
+        contact = BeautifulSoup('<a href="mailto:info@miempresa.es">Correo</a>', "html.parser")
+        with patch("scraper.web_analyzer._fetch",
+                   return_value=("<html></html>", contact, "https://miempresa.es/contacto", False)):
+            email, soups = _extract_email(home, "https://miempresa.es")
+        assert email == "info@miempresa.es"
+        assert soups == [contact]
+
+    def test_subpages_returned_even_when_no_email_is_found_anywhere(self):
+        # The soups are still worth handing back: the form check runs on them.
+        home = BeautifulSoup("<html><body>Nada</body></html>", "html.parser")
+        contact = BeautifulSoup("<html><body>Tampoco</body></html>", "html.parser")
+        with patch("scraper.web_analyzer._fetch",
+                   return_value=("<html></html>", contact, "https://miempresa.es/contacto", False)):
+            email, soups = _extract_email(home, "https://miempresa.es")
+        assert email == ""
+        assert len(soups) == len(_CONTACT_PATHS)
 
 
 # ── _best_email ───────────────────────────────────────────────────────────────
@@ -513,3 +566,18 @@ class TestDetectFormCompliance:
         html = (f'<form>{_CONTACT_FIELDS}<input type="checkbox"></form>'
                 f'<form>{_CONTACT_FIELDS}</form>')
         assert detect_form_compliance(_parse(html)) == ["form_without_consent"]
+
+    def test_offending_form_on_a_contact_subpage_is_found(self):
+        # The homepage is clean; the form only exists on /contacto, which is the
+        # normal layout and was invisible while only the homepage was inspected.
+        home = _parse("<html><body><h1>Inicio</h1></body></html>")
+        contact = _parse(f"<form>{_CONTACT_FIELDS}</form>")
+        assert detect_form_compliance(home, contact) == ["form_without_consent"]
+
+    def test_compliant_form_on_a_subpage_clears_it(self):
+        home = _parse("<html><body><h1>Inicio</h1></body></html>")
+        contact = _parse(f'<form>{_CONTACT_FIELDS}<input type="checkbox"></form>')
+        assert detect_form_compliance(home, contact) == []
+
+    def test_no_soups_reports_nothing(self):
+        assert detect_form_compliance() == []
