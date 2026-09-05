@@ -212,9 +212,14 @@ def _form_lacks_consent(soup) -> bool:
     return False
 
 
-def detect_form_compliance(soup) -> list[str]:
-    """Return issue keys for contact forms that gather personal data without consent."""
-    return ["form_without_consent"] if _form_lacks_consent(soup) else []
+def detect_form_compliance(*soups) -> list[str]:
+    """Return issue keys for contact forms that gather personal data without consent.
+
+    Takes several soups because the contact form usually lives on /contacto rather
+    than the homepage: pass any contact sub-pages that were already fetched. One
+    offending form anywhere is enough to report.
+    """
+    return ["form_without_consent"] if any(_form_lacks_consent(s) for s in soups) else []
 
 
 def detect_cookie_compliance(html: str, soup) -> list[str]:
