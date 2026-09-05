@@ -48,7 +48,7 @@ def _progress(text: str) -> None:
 
 def _finish(text: str) -> None:
     """Print a final line, clearing the in-place counter it replaces on a terminal."""
-    print(f"\r{text}" + " " * 10 if sys.stdout.isatty() else text)
+    print((f"\r{text}" + " " * 10) if sys.stdout.isatty() else text)
 
 
 def _maps_issues(job: dict) -> dict[str, str]:
