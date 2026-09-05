@@ -79,10 +79,17 @@ def map_to_api_shape(lead: dict) -> dict:
     return payload
 
 
-def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
+def map_analysis_to_api_shape(analysis: dict, message: dict, maps_issues: dict) -> dict:
     """Map web-analyzer output and a generated message to the analysis PATCH shape.
 
     Every field is optional on the API side, so only populated values are sent.
+
+    Args:
+        maps_issues: Google Maps listing gaps from ``_maps_issues``. Required
+            rather than defaulting, because these findings reach the customer
+            through the generated pitch and the agent has to be able to check
+            them against the panel — silently omitting them is the failure this
+            parameter exists to prevent.
     """
     payload = {}
     if analysis.get("cms"):
@@ -102,6 +109,12 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
         payload["compliance_issues"] = analysis.get("compliance_issues", {})
     if analysis.get("seo_issues"):
         payload["seo_issues"] = analysis["seo_issues"]
+
+    # Sent unconditionally, {} included, unlike compliance_issues above. These come
+    # from the job payload rather than from fetching the site, so they are known
+    # whether or not the website loaded: {} genuinely means "the listing is complete",
+    # and NULL stays exclusive to "the worker never processed this lead".
+    payload["maps_issues"] = maps_issues
 
     if message.get("subject"):
         payload["email_subject"] = message["subject"]
@@ -183,7 +196,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
                 report_analysis(job["id"], {"failed": True})
                 return
             message = generate({**base_context, "has_website": True})
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
             return
 
         if not job.get("website"):
@@ -195,10 +208,10 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
             # a pitch with no way to deliver it; reporting an empty message instead
             # settles the lead so it stops holding its parent search open.
             if not (job.get("phone") or job.get("email")):
-                report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
+                report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}, maps))
                 return
             message = generate({**base_context, "has_website": False})
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
             return
 
         # has_website comes from the analysis, not the raw job: analyze() blanks
@@ -208,7 +221,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
         # of which there are none, since a social URL yields an empty analysis. The
         # no-website scenario is the correct framing and the actual sales angle.
         message = generate({**base_context, "has_website": bool(analysis.get("website"))})
-        report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+        report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 402:
             search_id = job.get("lead_search_id")
