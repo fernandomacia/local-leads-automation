@@ -39,11 +39,14 @@ SELECTOR_FEED = 'div[role="feed"]'
 
 SCROLL_PIXELS = 600
 
-# Maps card fields the AI can use as pitch arguments — parallel to SEO_ISSUE_LABELS in web_analyzer.py
-MAPS_ISSUE_LABELS: dict[str, str] = {
-    "no_website": "Sin sitio web en Google Maps",
-    "no_phone":   "Sin teléfono en Google Maps",
-    "no_address": "Sin dirección en Google Maps",
+# Maps card fields the AI can use as pitch arguments — parallel to SEO_ISSUE_LABELS
+# in web_analyzer.py. Issue key -> (job field that must be populated, pitch label).
+# Both halves live in one entry so an issue cannot be declared with a field and no
+# label, or with a label the detector never produces.
+MAPS_ISSUES: dict[str, tuple[str, str]] = {
+    "no_website": ("website", "Sin sitio web en Google Maps"),
+    "no_phone":   ("phone",   "Sin teléfono en Google Maps"),
+    "no_address": ("address", "Sin dirección en Google Maps"),
 }
 
 

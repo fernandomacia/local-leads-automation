@@ -13,7 +13,7 @@ import time
 import requests
 
 from config import BATCH_SIZE, HEADLESS, POLL_INTERVAL, SOCIAL_DOMAINS
-from scraper.maps_scraper import scrape_incrementally, MAPS_ISSUE_LABELS
+from scraper.maps_scraper import scrape_incrementally, MAPS_ISSUES
 from scraper.web_analyzer import analyze
 from ai.message_generator import generate
 from api.client import (
@@ -30,8 +30,6 @@ from api.client import (
 logger = logging.getLogger(__name__)
 
 _SOCIAL_FIELDS = tuple(SOCIAL_DOMAINS.keys())
-
-_MAPS_FIELD_KEYS = {"no_website": "website", "no_phone": "phone", "no_address": "address"}
 
 
 def _progress(text: str) -> None:
@@ -53,7 +51,7 @@ def _finish(text: str) -> None:
 
 def _maps_issues(job: dict) -> dict[str, str]:
     """Return Maps card issues for fields missing from the job payload."""
-    return {k: MAPS_ISSUE_LABELS[k] for k, field in _MAPS_FIELD_KEYS.items() if not job.get(field)}
+    return {k: label for k, (field, label) in MAPS_ISSUES.items() if not job.get(field)}
 
 
 def map_to_api_shape(lead: dict) -> dict:
