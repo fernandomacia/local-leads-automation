@@ -9,6 +9,14 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
+# The worker's own version, tracked independently of the API's and the theme's — each
+# project versions on its own cycle, and this is simply the analogous place to keep it
+# (composer.json there, style.css in the theme). The three numbers are not meant to
+# match. Kept here rather than in packaging metadata because the worker is run directly
+# (``python worker.py``) rather than installed, so this is the only place a running
+# process can read its own version from. Tagged v<APP_VERSION> at release time.
+APP_VERSION = "2.0.0"
+
 # ── API worker (SegurSEO-API job queue) ───────────────────────────────────────
 
 API_BASE_URL = os.getenv("API_BASE_URL", "")
