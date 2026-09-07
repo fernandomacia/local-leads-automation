@@ -235,14 +235,20 @@ def scrape(profession: str, city: str, headless: bool = False, max_results: int 
     """
     with sync_playwright() as p:
         browser, _, page = _start_search(p, profession, city, headless)
-        hrefs = _collect_hrefs(page, max_results)
-        leads = []
-        for href in hrefs:
-            lead = _extract_with_retries(page, href, city)
-            if lead is not None:
-                leads.append(lead)
-        browser.close()
-        return leads
+        try:
+            hrefs = _collect_hrefs(page, max_results)
+            leads = []
+            for href in hrefs:
+                lead = _extract_with_retries(page, href, city)
+                if lead is not None:
+                    leads.append(lead)
+            return leads
+        finally:
+            # Belt and braces, matching scrape_incrementally: sync_playwright()'s
+            # __exit__ already stops the driver — and the browsers it spawned — on
+            # any exception, Ctrl+C included, so this closes at the point of failure
+            # rather than adding cleanup that was otherwise missing.
+            browser.close()
 
 
 def scrape_incrementally(
