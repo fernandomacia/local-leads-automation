@@ -5,6 +5,8 @@ See ``.env.example`` for the full list of available variables.
 """
 
 import os
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -19,10 +21,24 @@ APP_VERSION = "2.0.0"
 
 # ── API worker (SegurSEO-API job queue) ───────────────────────────────────────
 
-API_BASE_URL = os.getenv("API_BASE_URL", "")
+# Trailing slash stripped: every endpoint is built as f"{API_BASE_URL}/api/...", so a
+# pasted URL ending in "/" would produce a double slash on every request.
+API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
 API_TOKEN = os.getenv("API_TOKEN", "")
 if not API_BASE_URL or not API_TOKEN:
     raise EnvironmentError("API_BASE_URL and API_TOKEN must be set in .env")
+
+# The bearer token goes on every request, so plain HTTP would put it on the wire in
+# cleartext. Tolerated only against a local API, where the traffic never leaves the
+# machine. The mistake this catches is the likely one: copying .env.example, changing
+# the host for the production one, and leaving its http:// scheme in place.
+if not API_BASE_URL.startswith("https://") and (
+    urlparse(API_BASE_URL).hostname not in ("localhost", "127.0.0.1", "::1")
+):
+    raise EnvironmentError(
+        f"API_BASE_URL must use https:// for a remote host (got {API_BASE_URL!r}); "
+        "over plain HTTP the worker token would travel in cleartext"
+    )
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
