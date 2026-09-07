@@ -257,7 +257,11 @@ def _url_exists(url: str) -> bool:
 # won't be filterable.
 COMPLIANCE_ISSUE_LABELS: dict[str, str] = {
     "no_cookie_banner":  "Sin aviso ni gestor de cookies (RGPD/LSSI)",
-    "no_cookie_policy":  "Sin página de política de cookies",
+    # Fires independently of the banner, and often *with* one: a site can install the
+    # plugin and never publish the policy behind it. The label says so outright, because
+    # an agent told only "no cookie policy" gets rebutted with "but I do have a banner"
+    # and cannot tell that both are true at once.
+    "no_cookie_policy":  "Sin política de cookies: ninguna página detalla cuáles se instalan (RGPD/LSSI)",
     "no_legal_notice":   "Sin aviso legal (obligatorio por la LSSI)",
     "no_privacy_policy": "Sin política de privacidad (RGPD)",
     "form_without_consent": "Formulario de contacto sin consentimiento expreso (RGPD)",
