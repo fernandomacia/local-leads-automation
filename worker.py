@@ -12,7 +12,7 @@ import time
 
 import requests
 
-from config import APP_VERSION, BATCH_SIZE, HEADLESS, POLL_INTERVAL, SOCIAL_DOMAINS
+from config import API_BASE_URL, APP_VERSION, BATCH_SIZE, HEADLESS, POLL_INTERVAL, SOCIAL_DOMAINS
 from scraper.maps_scraper import scrape_incrementally, MAPS_ISSUES
 from scraper.web_analyzer import analyze
 from ai.message_generator import generate
@@ -248,9 +248,10 @@ def main() -> None:
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # Logged on every start so a running worker can be matched to a release when
-    # diagnosing a contract mismatch against the API.
-    print(f"[+] Worker started (v{APP_VERSION})")
+    # Both printed on every start: the version to match a running worker to a release
+    # when diagnosing a contract mismatch, and the target so an interactive run cannot
+    # be scraping against development while its operator believes it is production.
+    print(f"[+] Worker started (v{APP_VERSION}) — API: {API_BASE_URL}")
     analysis_idx = 0
     analysis_total = 0
     was_analyzing = False
