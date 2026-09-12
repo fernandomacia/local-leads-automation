@@ -79,6 +79,15 @@ class TestMapAnalysisToApiShape:
         result = map_analysis_to_api_shape({"seo_score": None, "compliance_issues": {}}, {}, {})
         assert "compliance_issues" not in result
 
+    def test_compliance_details_ride_along_with_the_issues(self):
+        details = {"legal_notice": {"status": "missing", "found_url": None, "method": "link"}}
+        analysis = {"seo_score": 70, "compliance_issues": {}, "compliance_details": details}
+        assert map_analysis_to_api_shape(analysis, {}, {})["compliance_details"] == details
+
+    def test_compliance_details_omitted_when_site_not_analyzed(self):
+        result = map_analysis_to_api_shape({"seo_score": None, "compliance_details": {}}, {}, {})
+        assert "compliance_details" not in result
+
     def test_maps_issues_forwarded_to_the_payload(self):
         maps = {"no_address": "Sin dirección en la ficha"}
         result = map_analysis_to_api_shape({"seo_score": 70}, {}, maps)

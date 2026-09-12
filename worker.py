@@ -105,6 +105,10 @@ def map_analysis_to_api_shape(analysis: dict, message: dict, maps_issues: dict) 
         # called compliant. Gating on the score keeps NULL exclusive to "not analyzed" —
         # sending {} unconditionally would make an unreachable site read as clean.
         payload["compliance_issues"] = analysis.get("compliance_issues", {})
+        # The evidence behind each finding (which URL was checked, in which language,
+        # why a check did not apply). Rides along with the issues so the panel can
+        # justify a finding when the business owner disputes it on the call.
+        payload["compliance_details"] = analysis.get("compliance_details", {})
     if analysis.get("seo_issues"):
         payload["seo_issues"] = analysis["seo_issues"]
 
@@ -178,7 +182,13 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
     counter = f" {idx}" if idx else ""
     _progress(f"[>] Analyzing{counter}")
     try:
-        analysis = analyze({"lead": job["business_name"], "website": job["website"]})
+        # profession drives the legal-notice checks that only apply to regulated
+        # professions (bar association and membership number, LSSI art. 10.1.c).
+        analysis = analyze({
+            "lead": job["business_name"],
+            "website": job["website"],
+            "profession": job.get("profession", ""),
+        })
 
         cms = analysis.get("cms")
         maps = _maps_issues(job)
