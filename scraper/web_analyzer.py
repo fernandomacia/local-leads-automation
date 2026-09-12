@@ -10,6 +10,7 @@ import ipaddress
 import re
 import socket
 import warnings
+from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -447,4 +448,8 @@ def analyze(lead: dict) -> dict:
         "seo_score": seo_score,
         "seo_issues": {k: SEO_ISSUE_LABELS.get(k, k) for k in seo_issues},
         **compliance,
+        # The audit's own clock, not the report's: a legal finding is only
+        # defensible against the state of the site on the day it was read, and
+        # the site can be fixed between the audit and the sales call.
+        "compliance_checked_at": datetime.now(timezone.utc).isoformat(),
     }

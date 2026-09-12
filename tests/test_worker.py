@@ -84,6 +84,18 @@ class TestMapAnalysisToApiShape:
         analysis = {"seo_score": 70, "compliance_issues": {}, "compliance_details": details}
         assert map_analysis_to_api_shape(analysis, {}, {})["compliance_details"] == details
 
+    def test_compliance_checked_at_is_forwarded(self):
+        analysis = {"seo_score": 70, "compliance_details": {},
+                    "compliance_checked_at": "2026-09-12T08:30:00+00:00"}
+        result = map_analysis_to_api_shape(analysis, {}, {})
+        assert result["compliance_checked_at"] == "2026-09-12T08:30:00+00:00"
+
+    def test_compliance_checked_at_omitted_when_the_audit_never_ran(self):
+        # NULL is the panel's "never audited"; a timestamp with no audit behind it
+        # would date a finding that was never made.
+        result = map_analysis_to_api_shape({"seo_score": 70, "compliance_details": {}}, {}, {})
+        assert "compliance_checked_at" not in result
+
     def test_compliance_details_omitted_when_site_not_analyzed(self):
         result = map_analysis_to_api_shape({"seo_score": None, "compliance_details": {}}, {}, {})
         assert "compliance_details" not in result

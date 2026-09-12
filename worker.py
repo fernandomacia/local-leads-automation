@@ -109,6 +109,8 @@ def map_analysis_to_api_shape(analysis: dict, message: dict, maps_issues: dict) 
         # why a check did not apply). Rides along with the issues so the panel can
         # justify a finding when the business owner disputes it on the call.
         payload["compliance_details"] = analysis.get("compliance_details", {})
+        if checked_at := analysis.get("compliance_checked_at"):
+            payload["compliance_checked_at"] = checked_at
     if analysis.get("seo_issues"):
         payload["seo_issues"] = analysis["seo_issues"]
 
