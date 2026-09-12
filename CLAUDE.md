@@ -24,6 +24,15 @@ scraper/
   maps_scraper.py            # Extracts lead, website, phone, address from Google Maps
                               # scrape() for ad-hoc use; scrape_incrementally() for worker.py
   web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring, is_contactable()
+  compliance/                # Legal audit package — detect_compliance() returns issues + details
+    vocabulary.py            # Multilingual lexicon + URL slugs (data only)
+    matching.py              # Normalization, word-boundary matching, slug/path matching, site language
+    cmp.py                   # Consent platforms, hand-rolled banners, reject control
+    trackers.py              # Signals that create a consent obligation
+    legal_pages.py           # Document resolution + verification (GET, probing, RequestBudget)
+    page_content.py          # Mandatory content: NIF/CIF, LSSI art. 10, RGPD art. 13
+    rendering.py             # Playwright fallback for footers built client-side
+    forms.py                 # Form consent (missing, link-only, pre-ticked)
 ai/
   message_generator.py       # Generates personalized outreach emails via OpenRouter API
 api/
@@ -100,7 +109,7 @@ def analyze_website(url: str) -> dict:
 
 ### Work Sessions
 - Build in phases: make it work first, then polish
-- Current phase: **Phase 5 complete — SegurSEO-API job-queue worker shipped**
+- Current phase: **Phase 7 complete — compliance package with real page verification**
 - At the end of each phase, update this file with lessons learned
 
 ### Scraping
@@ -114,6 +123,27 @@ def analyze_website(url: str) -> dict:
   consecutive scroll waves with no new hrefs at all (end of feed), so an
   exhausted search doesn't scroll forever. Known (skipped) leads reset the
   counter — only a truly empty scroll wave counts as idle.
+
+### Compliance auditing
+- Bias is asymmetric on purpose: a false positive is read out loud to a business
+  owner as "you are breaking the law". Anything ambiguous resolves to compliant,
+  and a check that cannot see enough reports `unknown`, never a finding.
+- Never match legal terms with `in`: `"legal" in "/asesoria-legal"` is true and
+  wrong. Use `matching.contains_term` (word boundaries) and `matches_slug`
+  (path segments), both on normalized text.
+- The lexicon covers 28 languages because a Spanish business with an English or
+  German site would otherwise be reported as having no legal texts at all.
+- Verification costs requests against sites that never asked to be scanned:
+  `MAX_COMPLIANCE_REQUESTS` (12/lead) is a hard cap, split evenly between the
+  documents that need probing so the last one is still checked.
+- The Playwright fallback only fires when *no* legal link is found in any
+  language, and its output is discarded if the DOM comes back under 500 chars —
+  an empty render would turn every check into a finding.
+- Adding an issue key means mirroring it in `COMPLIANCE_FILTER_OPTIONS`
+  (SegurSEO-Platform, `src/app/features/leads/utils.ts`); labels themselves need
+  no frontend change.
+- `compliance_details` is sent on `PATCH /leads/{id}/analysis` alongside
+  `compliance_issues` — the API must accept the field or it will 422.
 
 ### Outreach
 - Final sending is semi-manual (not mass automated) to comply with GDPR
@@ -174,3 +204,4 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
 - [x] Phase 4: CLI (`--profession`, `--city`, `--max`, `--no-headless`) + Streamlit dashboard + API client + JSON output
 - [x] Phase 5: SegurSEO-API job-queue integration — `worker.py` daemon polling two queues (Maps discovery, lead analysis); `api/client.py` rewritten around the 6-endpoint contract; `scrape_incrementally()` added to `maps_scraper.py` for batched, domain-deduplicated discovery.
 - [x] Phase 6: Removed `main.py`, `app.py`, `data/` and Streamlit/pandas dependencies — pipeline is now driven exclusively by the SegurSEO-API job queue via Angular + Laravel.
+- [x] Phase 7: `scraper/cookie_detection.py` replaced by the `scraper/compliance/` package — 28-language lexicon, word-boundary and slug matching, reject-control detection, extended trackers, form-consent findings (7a); then real page verification with a request budget, mandatory-content validation, and a Chromium fallback for JS-built footers (7b).

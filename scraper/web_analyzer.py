@@ -16,12 +16,8 @@ from urllib3.exceptions import InsecureRequestWarning
 import requests
 from bs4 import BeautifulSoup
 
-from config import SOCIAL_DOMAINS
-from scraper.cookie_detection import (
-    detect_cookie_compliance,
-    detect_form_compliance,
-    detect_legal_pages,
-)
+from config import COMPLIANCE_RENDER_FALLBACK, COMPLIANCE_TIMEOUT, SOCIAL_DOMAINS
+from scraper.compliance import detect_compliance
 
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
@@ -160,6 +156,54 @@ def _fetch(url: str) -> tuple[str, BeautifulSoup, str, bool] | None:
         return None
 
 
+def _fetch_legal_page(url: str) -> tuple[int, str | None] | None:
+    """GET a secondary page for the compliance audit.
+
+    Differs from ``_fetch`` in what counts as an answer: a 404 on a linked legal
+    page is a finding, not a failure, so the status code is returned rather than
+    swallowed. Certificate validity was already settled when the homepage loaded,
+    so this skips straight to ``verify=False`` instead of paying for a retry.
+
+    Returns:
+        ``(status_code, html)`` — with ``html`` None when the body is not HTML
+        we can read (a PDF legal notice, for instance), meaning the page exists
+        but its content cannot be validated. ``None`` when the request failed at
+        the network level, which is distinct from a 404.
+    """
+    if not _host_ok(url):
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", InsecureRequestWarning)
+            resp = requests.get(
+                url, timeout=(COMPLIANCE_TIMEOUT, COMPLIANCE_TIMEOUT), headers=HEADERS,
+                allow_redirects=True, verify=False, stream=True,
+            )
+        if resp.url != url and not _host_ok(resp.url):
+            return None
+        # Soft 404: a large share of WordPress installs redirect unknown paths to
+        # the homepage with a 200. The page exists in the HTTP sense and in no other.
+        if urlparse(url).path.strip("/") and not urlparse(resp.url).path.strip("/"):
+            return 404, None
+        if resp.status_code >= 400 or "html" not in resp.headers.get("Content-Type", ""):
+            return resp.status_code, None
+        raw = resp.raw.read(MAX_RESPONSE_BYTES, decode_content=True)
+        return resp.status_code, raw.decode("utf-8", errors="replace")
+    except requests.RequestException:
+        return None
+
+
+def _render_fallback(url: str) -> str | None:
+    """Render a page with Chromium, importing Playwright only when it is needed.
+
+    Only the minority of leads whose footer is built client-side ever reach a
+    browser; a module-level import would pull the driver into every process that
+    merely wants to parse HTML.
+    """
+    from scraper.compliance.rendering import render
+    return render(url)
+
+
 def _identify_platform(url: str) -> str | None:
     """Return the social platform name if the URL belongs to one, else ``None``."""
     host = urlparse(url).netloc.lower().removeprefix("www.")
@@ -250,23 +294,6 @@ def _url_exists(url: str) -> bool:
         return False
 
 
-# Adding a key here? The platform renders these labels as they arrive, so the lead card
-# and the list column pick it up with no frontend change. The list *filter* is the
-# exception: its dropdown must know the keys before loading data, so mirror the new key
-# in COMPLIANCE_FILTER_OPTIONS (SegurSEO-Platform, src/app/features/leads/utils.ts) or it
-# won't be filterable.
-COMPLIANCE_ISSUE_LABELS: dict[str, str] = {
-    "no_cookie_banner":  "Sin aviso ni gestor de cookies (RGPD/LSSI)",
-    # Fires independently of the banner, and often *with* one: a site can install the
-    # plugin and never publish the policy behind it. The label says so outright, because
-    # an agent told only "no cookie policy" gets rebutted with "but I do have a banner"
-    # and cannot tell that both are true at once.
-    "no_cookie_policy":  "Sin política de cookies: ninguna página detalla cuáles se instalan (RGPD/LSSI)",
-    "no_legal_notice":   "Sin aviso legal (obligatorio por la LSSI)",
-    "no_privacy_policy": "Sin política de privacidad (RGPD)",
-    "form_without_consent": "Formulario de contacto sin consentimiento expreso (RGPD)",
-}
-
 SEO_ISSUE_LABELS: dict[str, str] = {
     "no_https":           "Sin certificado SSL (web no segura)",
     "invalid_ssl":        "Certificado SSL caducado o no válido",
@@ -356,7 +383,7 @@ _EMPTY_ANALYSIS: dict = {
     "cms": "", "email": "",
     **{p: "" for p in SOCIAL_DOMAINS},
     "seo_score": None, "seo_issues": {},
-    "compliance_issues": {},
+    "compliance_issues": {}, "compliance_details": {},
 }
 
 # All fields that constitute a reachable contact channel (phone is scraped from Maps but not
@@ -377,7 +404,9 @@ def analyze(lead: dict) -> dict:
     """Enrich a lead with CMS, contact, social, and SEO data from its website.
 
     Args:
-        lead: Dict with at least a ``website`` key.
+        lead: Dict with at least a ``website`` key. An optional ``profession``
+            key enables the legal-notice requirements that only apply to
+            regulated professions.
 
     Returns:
         The lead dict extended with ``cms``, ``email``, per-platform social URLs,
@@ -399,14 +428,15 @@ def analyze(lead: dict) -> dict:
     html, soup, final_url, invalid_ssl = result
     cms = _detect_cms(html)
     seo_score, seo_issues = _score_seo(soup, final_url, invalid_ssl=invalid_ssl)
-    # Contact sub-pages fetched while looking for the email are reused for the form
-    # check — the contact form rarely sits on the homepage, and this costs no extra
-    # request. Legal links live in the footer of every page, so those need no reuse.
+    # Contact sub-pages fetched while looking for the email are reused for the
+    # compliance audit — the contact form rarely sits on the homepage, and a footer
+    # that only renders on inner pages is common. Neither costs an extra request.
     email, contact_soups = _extract_email(soup, final_url)
-    compliance_issues = (
-        detect_cookie_compliance(html, soup)
-        + detect_legal_pages(soup)
-        + detect_form_compliance(soup, *contact_soups)
+    compliance = detect_compliance(
+        html, soup, final_url, contact_soups,
+        fetch=_fetch_legal_page,
+        render=_render_fallback if COMPLIANCE_RENDER_FALLBACK else None,
+        profession=lead.get("profession", ""),
     )
 
     return {
@@ -416,5 +446,5 @@ def analyze(lead: dict) -> dict:
         **_extract_socials(soup),
         "seo_score": seo_score,
         "seo_issues": {k: SEO_ISSUE_LABELS.get(k, k) for k in seo_issues},
-        "compliance_issues": {k: COMPLIANCE_ISSUE_LABELS.get(k, k) for k in compliance_issues},
+        **compliance,
     }

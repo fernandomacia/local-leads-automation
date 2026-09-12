@@ -65,6 +65,22 @@ MAX_EXTRACTION_RETRIES = 3
 MAX_IDLE_SCROLLS = 5        # consecutive scroll waves with no new non-skipped lead before giving up
 HEADLESS = os.getenv("HEADLESS", "true").lower() != "false"
 
+# ── Compliance audit ──────────────────────────────────────────────────────────
+
+# Verifying the legal pages costs requests the static analysis never made: up to
+# one per document link plus a handful of probes for the documents with no link.
+# The cap is per lead and hard — once spent, the remaining documents are reported
+# as "unknown" rather than guessed as missing.
+MAX_COMPLIANCE_REQUESTS = int(os.getenv("MAX_COMPLIANCE_REQUESTS", "12"))
+COMPLIANCE_TIMEOUT = 5      # seconds per legal-page request; these are secondary checks
+MIN_LEGAL_PAGE_CHARS = 400  # below this a legal page is an empty template, not a document
+
+# Re-fetch with a real browser when the static HTML shows no legal link at all.
+# Footers built by JavaScript are the main source of false "no legal notice"
+# findings, and only a small fraction of leads reach this path.
+COMPLIANCE_RENDER_FALLBACK = os.getenv("COMPLIANCE_RENDER_FALLBACK", "true").lower() != "false"
+RENDER_TIMEOUT_MS = 20000
+
 # ── AI message generation ─────────────────────────────────────────────────────
 
 SENDER_COMPANY = os.getenv("SENDER_COMPANY", "")
