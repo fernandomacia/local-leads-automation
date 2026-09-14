@@ -91,6 +91,14 @@ class TestMapAnalysisToApiShape:
         analysis = {"seo_score": 70, "compliance_issues": {}, "compliance_details": details}
         assert map_analysis_to_api_shape(analysis, {}, {})["compliance_details"] == details
 
+    def test_site_language_rides_along_with_the_issues(self):
+        analysis = {"seo_score": 70, "compliance_details": {}, "compliance_language": "ca"}
+        assert map_analysis_to_api_shape(analysis, {}, {})["compliance_language"] == "ca"
+
+    def test_site_language_omitted_when_the_site_declares_none(self):
+        analysis = {"seo_score": 70, "compliance_details": {}, "compliance_language": ""}
+        assert "compliance_language" not in map_analysis_to_api_shape(analysis, {}, {})
+
     def test_compliance_checked_at_is_forwarded(self):
         analysis = {"seo_score": 70, "compliance_details": {},
                     "compliance_checked_at": "2026-09-12T08:30:00+00:00"}

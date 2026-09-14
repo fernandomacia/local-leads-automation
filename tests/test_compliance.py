@@ -152,6 +152,13 @@ class TestDocumentDetection:
         assert _documents('<html lang="de"><a href="/p/1">Impressum</a></html>'
                           )["legal_notice"]["language"] == "de"
 
+    def test_the_site_language_is_reported_apart_from_the_match(self):
+        # A bilingual site: the link matched the German lexicon, but the site declares
+        # Spanish. The panel labels this one "the language the web is written in".
+        result = _audit('<html lang="es"><a href="/p/1">Impressum</a></html>')
+        assert result["compliance_language"] == "es"
+        assert result["compliance_details"]["legal_notice"]["language"] == "de"
+
     def test_the_policy_wins_over_an_article_that_merely_mentions_the_term(self):
         # Real case from aepd.es: a press release about home CCTV matched
         # "protección de datos" and was reported as the privacy policy.

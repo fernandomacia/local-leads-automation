@@ -355,7 +355,7 @@ _EMPTY_ANALYSIS: dict = {
     "cms": "", "email": "",
     **{p: "" for p in SOCIAL_DOMAINS},
     "seo_score": None, "seo_issues": {},
-    "compliance_issues": {}, "compliance_details": {},
+    "compliance_issues": {}, "compliance_details": {}, "compliance_language": "",
 }
 
 # All fields that constitute a reachable contact channel (phone is scraped from Maps but not

@@ -120,8 +120,9 @@ def detect_compliance(html: str, soup, base_url: str, extra_soups=(), *,
     Returns:
         ``compliance_issues`` as the customer reads them, ``compliance_details``
         with the evidence per document so a finding can be defended when the
-        owner disputes it, and ``compliance_rendered`` — whether a browser was
-        needed, which is what the analysis costs in memory rather than requests.
+        owner disputes it, ``compliance_language`` — the language the site
+        declares — and ``compliance_rendered``, whether a browser was needed,
+        which is what the analysis costs in memory rather than requests.
     """
     html_lower = html.lower()
     soups = [soup, *extra_soups]
@@ -172,5 +173,8 @@ def detect_compliance(html: str, soup, base_url: str, extra_soups=(), *,
 
     issues.update({k: COMPLIANCE_ISSUE_LABELS[k] for k in detect_form_consent(*soups)})
 
+    # The site language is reported on its own rather than left to be inferred from
+    # the per-document entries: those carry the language whose lexicon matched the
+    # link, which on a bilingual site is not the language the site is written in.
     return {"compliance_issues": issues, "compliance_details": details,
-            "compliance_rendered": rendered}
+            "compliance_language": language, "compliance_rendered": rendered}

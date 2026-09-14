@@ -109,6 +109,11 @@ def map_analysis_to_api_shape(analysis: dict, message: dict, maps_issues: dict) 
         # why a check did not apply). Rides along with the issues so the panel can
         # justify a finding when the business owner disputes it on the call.
         payload["compliance_details"] = analysis.get("compliance_details", {})
+        # The language the site declares, which tells the agent what to call in. Sent
+        # apart from the per-document entries: those hold the language whose lexicon
+        # matched each link, and on a bilingual site the two differ.
+        if language := analysis.get("compliance_language"):
+            payload["compliance_language"] = language
         if checked_at := analysis.get("compliance_checked_at"):
             payload["compliance_checked_at"] = checked_at
     if analysis.get("seo_issues"):

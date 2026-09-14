@@ -84,6 +84,7 @@ Angular frontend — results are reported straight to the API via
 | `seo_issues` | Web | Issue key → Spanish label (see below) |
 | `compliance_issues` | Web | Legal compliance issue key → Spanish label (see below) |
 | `compliance_details` | Web | Evidence per legal document: status, URL found, language, method |
+| `compliance_language` | Web | Language the site declares (`html[lang]`, `og:locale`, `hreflang`) |
 | `maps_issues` | Maps | Listing gap key → Spanish label (see below) |
 | `email_subject` | AI | Generated email subject line |
 | `email_body` | AI | Generated email body (ready to send) |
@@ -176,6 +177,11 @@ feeds every check, the cookie banner included.
 
 Statuses: `ok`, `incomplete`, `broken_link`, `unlinked`, `missing`,
 `not_applicable`, `unknown`.
+
+The `language` inside each entry is the lexicon that matched that document's link,
+which on a bilingual site is not the language of the site. The site's own
+declaration travels apart, as `compliance_language`: it is what the panel labels
+the lead with and what the agent calls in.
 
 ### Google Maps listing issues detected
 

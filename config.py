@@ -17,7 +17,7 @@ load_dotenv(override=True)
 # match. Kept here rather than in packaging metadata because the worker is run directly
 # (``python worker.py``) rather than installed, so this is the only place a running
 # process can read its own version from. Tagged v<APP_VERSION> at release time.
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.3.0"
 
 # ── API worker (SegurSEO-API job queue) ───────────────────────────────────────
 
