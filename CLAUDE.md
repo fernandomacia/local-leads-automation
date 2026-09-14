@@ -139,9 +139,9 @@ def analyze_website(url: str) -> dict:
 - The Playwright fallback only fires when *no* legal link is found in any
   language, and its output is discarded if the DOM comes back under 500 chars —
   an empty render would turn every check into a finding.
-- Adding an issue key means mirroring it in `COMPLIANCE_FILTER_OPTIONS`
-  (SegurSEO-Platform, `src/app/features/leads/utils.ts`); labels themselves need
-  no frontend change.
+- Adding an issue key means declaring it in the API's `ComplianceIssue` enum,
+  which serves the panel's filter dropdown through `GET /compliance-issues`;
+  labels themselves need no change on either side.
 - `compliance_details` is sent on `PATCH /leads/{id}/analysis` alongside
   `compliance_issues` — the API must accept the field or it will 422.
 
