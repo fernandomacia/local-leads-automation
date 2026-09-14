@@ -151,7 +151,14 @@ def analyze_website(url: str) -> dict:
   the host: a lead that renders costs a Chromium process.
 - Adding an issue key means declaring it in the API's `ComplianceIssue` enum,
   which serves the panel's filter dropdown through `GET /compliance-issues`;
-  labels themselves need no change on either side.
+  labels themselves need no change on either side. Statuses are stricter: the
+  API validates `compliance_details.*.status` against `ComplianceStatus`, so one
+  invented here is a 422 and a lead reported as failed.
+- After changing either vocabulary, regenerate the contract dump and commit it on
+  the API side, where a test compares it against the enums:
+  `python -m scraper.compliance --dump-keys > compliance-keys.json`. Nothing
+  prevents divergence at runtime; this only makes it fail in CI instead of in
+  production.
 - `compliance_details` is sent on `PATCH /leads/{id}/analysis` alongside
   `compliance_issues` — the API must accept the field or it will 422.
 

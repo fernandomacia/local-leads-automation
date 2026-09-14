@@ -178,6 +178,18 @@ feeds every check, the cookie banner included.
 Statuses: `ok`, `incomplete`, `broken_link`, `unlinked`, `missing`,
 `not_applicable`, `unknown`.
 
+The API validates the status of every document against its own enum, so the two
+vocabularies have to agree. They are written in different languages and cannot
+share a definition, so the worker dumps its own:
+
+```bash
+python -m scraper.compliance --dump-keys > compliance-keys.json
+```
+
+Commit that file on the API side, where a test compares it against
+`ComplianceIssue` and `ComplianceStatus`. It does not prevent divergence — it
+makes it fail in CI rather than as a 422 with every lead reported as failed.
+
 The `language` inside each entry is the lexicon that matched that document's link,
 which on a bilingual site is not the language of the site. The site's own
 declaration travels apart, as `compliance_language`: it is what the panel labels

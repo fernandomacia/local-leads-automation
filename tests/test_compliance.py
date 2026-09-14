@@ -7,15 +7,24 @@ business owner as "you are breaking the law", so most cases here assert that a
 compliant site is reported clean.
 """
 
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 from bs4 import BeautifulSoup
 
 from config import MAX_COMPLIANCE_REQUESTS
 
-from scraper.compliance import detect_compliance
+from scraper import compliance
+
+from scraper.compliance import COMPLIANCE_ISSUE_LABELS, detect_compliance
 from scraper.compliance.cmp import has_cmp, has_generic_banner, reject_status
 from scraper.compliance.forms import detect_form_consent
-from scraper.compliance.legal_pages import find_links, verify_documents
+from scraper.compliance.__main__ import contract
+from scraper.compliance.legal_pages import DOCUMENT_STATUSES, find_links, verify_documents
 from scraper.compliance.matching import (
     detect_language,
     match_language,
@@ -695,3 +704,55 @@ class TestProbeBudgetEfficiency:
         detail = _audit("<html><body><h1>Inicio</h1></body></html>",
                         fetch=fetch)["compliance_details"]["legal_notice"]
         assert detail["status"] == "unlinked"
+
+
+# ── vocabulary contract with the API ──────────────────────────────────────────
+
+class TestVocabularyContract:
+    """The worker and the API cannot share a type, so the vocabulary is dumped.
+
+    These tests guard the worker's half: that the dump is complete, and that no
+    value is invented outside the declared sets. The API's half compares its own
+    enums against the committed dump.
+    """
+
+    def test_dump_covers_every_issue_key_and_status(self):
+        payload = contract()
+        assert set(payload["issues"]) == set(COMPLIANCE_ISSUE_LABELS)
+        assert set(payload["document_statuses"]) == set(DOCUMENT_STATUSES)
+        assert payload["issues"] == sorted(payload["issues"]), "unsorted dump churns the diff"
+
+    def test_no_status_is_invented_outside_the_declared_set(self):
+        # The statuses are returned as literals at a dozen return statements; this
+        # is what stops one of them drifting from the declared vocabulary and
+        # failing the API's request validation in production.
+        package = Path(compliance.__file__).parent
+        emitted = set()
+        for source in package.glob("*.py"):
+            emitted |= set(re.findall(r'"status":\s*"(\w+)"', source.read_text()))
+        assert emitted <= set(DOCUMENT_STATUSES), f"undeclared status: {emitted - set(DOCUMENT_STATUSES)}"
+
+    def test_every_derivable_document_key_has_a_label(self):
+        # Document keys are built by formatting, so a new status silently yields a
+        # key with no label and the panel shows the raw key to the agent.
+        documents = contract()["documents"]
+        assert documents
+        for document in documents:
+            assert f"no_{document}" in COMPLIANCE_ISSUE_LABELS
+            for suffix in ("broken", "unlinked", "incomplete"):
+                assert f"{document}_{suffix}" in COMPLIANCE_ISSUE_LABELS
+
+    def test_the_command_line_prints_valid_json(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "scraper.compliance", "--dump-keys"],
+            capture_output=True, text=True, cwd=Path(compliance.__file__).parents[2],
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == contract()
+
+    def test_the_command_refuses_to_run_with_no_flag(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "scraper.compliance"],
+            capture_output=True, text=True, cwd=Path(compliance.__file__).parents[2],
+        )
+        assert result.returncode != 0

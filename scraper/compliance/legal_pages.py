@@ -37,6 +37,12 @@ from .vocabulary import DOCUMENT_SLUGS, DOCUMENT_TERMS, PROBE_PATHS
 
 DOCUMENTS = tuple(DOCUMENT_TERMS)
 
+# Every verdict a document can carry. Declared rather than left as literals at the
+# return statements because the API validates this field: a status invented here
+# fails validation there, and the lead is reported as failed rather than analysed.
+DOCUMENT_STATUSES = ("ok", "incomplete", "broken_link", "unlinked", "missing",
+                     "not_applicable", "unknown")
+
 # Consecutive network-level failures that end a document's probing. A server that
 # has stopped answering will not answer the remaining paths either, and each one
 # costs a full connect timeout — the probes are the most numerous requests the
