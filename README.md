@@ -147,6 +147,11 @@ professions are additionally required to state their bar association and
 membership number (LSSI art. 10.1.c), decided from the search term the lead came
 from.
 
+Every URL is checked against the SSRF guard before it is requested — including
+the ones built from hrefs on the analyzed page, which is untrusted input — and
+probing a document stops after two consecutive network failures, since a host
+that stopped answering will not answer the remaining paths either.
+
 Verification is capped at `MAX_COMPLIANCE_REQUESTS` (12) per lead, shared evenly
 between the documents that need probing. When the budget runs out the remaining
 documents are reported as `unknown` and produce **no finding**: not knowing is
@@ -193,6 +198,7 @@ worker.py                    # Daemon: polls SegurSEO-API job queues, drives scr
 scraper/
   maps_scraper.py            # Scrapes businesses from Google Maps
   web_analyzer.py            # CMS detection, contacts, SEO scoring
+  net_guard.py               # SSRF guard shared by every fetch and the browser
   compliance/                # Legal compliance audit (LSSI, GDPR, cookies)
     __init__.py              # detect_compliance(): orchestration, issue labels
     vocabulary.py            # Multilingual lexicon and URL slugs

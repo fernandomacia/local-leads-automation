@@ -1,9 +1,8 @@
 """Tests for scraper/web_analyzer.py — no network.
 
-socket.getaddrinfo and requests.get/head are patched so every test runs
-without touching the network. The SSRF cases (_is_public_host) are treated
-as security-critical: they cover every private/reserved range because they
-will not be verified manually in production.
+socket.getaddrinfo and requests.get/head are patched so every test runs without
+touching the network. The host guard these fetches resolve through is covered in
+tests/test_net_guard.py.
 """
 
 import socket
@@ -20,8 +19,6 @@ from scraper.web_analyzer import (
     _best_email,
     _extract_email,
     _fetch,
-    _host_ok,
-    _is_public_host,
     _url_exists,
 )
 
@@ -56,69 +53,18 @@ PUBLIC = _addr("93.184.216.34")   # example.com — globally routable
 PRIVATE = _addr("192.168.1.1")    # RFC 1918
 
 
-# ── _is_public_host (SSRF guard — mandatory coverage) ─────────────────────────
-
-class TestIsPublicHost:
-    @pytest.mark.parametrize("ip", [
-        "10.0.0.1",        # RFC 1918 class A
-        "172.16.0.1",      # RFC 1918 class B
-        "192.168.1.1",     # RFC 1918 class C
-        "127.0.0.1",       # IPv4 loopback
-        "::1",             # IPv6 loopback
-        "169.254.169.254", # AWS/GCP metadata (link-local)
-        "0.0.0.0",         # reserved / unspecified
-        "224.0.0.1",       # multicast
-    ])
-    def test_internal_ip_rejected(self, ip):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=_addr(ip)):
-            assert _is_public_host("target") is False
-
-    def test_public_ipv4_accepted(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC):
-            assert _is_public_host("example.com") is True
-
-    def test_dns_failure_returns_false(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", side_effect=socket.gaierror):
-            assert _is_public_host("nonexistent.invalid") is False
-
-    def test_empty_getaddrinfo_result_returns_false(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=[]):
-            assert _is_public_host("example.com") is False
-
-    def test_any_private_address_in_multi_record_rejects(self):
-        # All resolved IPs must be public — one private one is enough to reject
-        mixed = PUBLIC + PRIVATE
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=mixed):
-            assert _is_public_host("example.com") is False
-
-
-# ── _host_ok ──────────────────────────────────────────────────────────────────
-
-class TestHostOk:
-    def test_rejects_url_with_private_host(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PRIVATE):
-            assert _host_ok("https://192.168.1.1/path") is False
-
-    def test_accepts_url_with_public_host(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC):
-            assert _host_ok("https://example.com/path") is True
-
-    def test_rejects_url_with_no_hostname(self):
-        assert _host_ok("not-a-url") is False
-
-
 # ── _fetch ────────────────────────────────────────────────────────────────────
 
 class TestFetch:
     def test_rejects_private_host_before_connecting(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PRIVATE), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PRIVATE), \
              patch("scraper.web_analyzer.requests.get") as mock_get:
             result = _fetch("https://192.168.1.1/")
         assert result is None
         mock_get.assert_not_called()
 
     def test_happy_path_returns_four_tuple(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.get", return_value=_mock_get()):
             result = _fetch("https://example.com")
         assert result is not None
@@ -131,36 +77,36 @@ class TestFetch:
     def test_rejects_open_redirect_to_private_host(self):
         # Initial URL is public but redirect lands on a private IP
         resp = _mock_get(url="http://192.168.1.1/")
-        with patch("scraper.web_analyzer.socket.getaddrinfo", side_effect=[PUBLIC, PRIVATE]), \
+        with patch("scraper.net_guard.socket.getaddrinfo", side_effect=[PUBLIC, PRIVATE]), \
              patch("scraper.web_analyzer.requests.get", return_value=resp):
             assert _fetch("https://example.com") is None
 
     def test_rejects_non_html_content_type(self):
         resp = _mock_get(content_type="application/json")
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.get", return_value=resp):
             assert _fetch("https://example.com") is None
 
     def test_returns_none_on_5xx(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.get", return_value=_mock_get(status=500)):
             assert _fetch("https://example.com") is None
 
     def test_returns_none_on_connection_timeout(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.get", side_effect=requests.Timeout):
             assert _fetch("https://example.com") is None
 
     def test_caps_response_at_max_bytes(self):
         resp = _mock_get()
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.get", return_value=resp):
             _fetch("https://example.com")
         resp.raw.read.assert_called_once_with(MAX_RESPONSE_BYTES, decode_content=True)
 
     def test_ssl_error_sets_invalid_ssl_and_retries(self):
         good_resp = _mock_get()
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.get", side_effect=[
                  requests.exceptions.SSLError, good_resp
              ]):
@@ -172,7 +118,7 @@ class TestFetch:
     def test_ssl_error_still_returns_html(self):
         body = b"<html><body>SSL fail site</body></html>"
         good_resp = _mock_get(body=body)
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.get", side_effect=[
                  requests.exceptions.SSLError, good_resp
              ]):
@@ -186,7 +132,7 @@ class TestFetch:
 
 class TestUrlExists:
     def test_rejects_private_host_before_connecting(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PRIVATE), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PRIVATE), \
              patch("scraper.web_analyzer.requests.head") as mock_head:
             assert _url_exists("https://192.168.1.1/sitemap.xml") is False
         mock_head.assert_not_called()
@@ -194,19 +140,19 @@ class TestUrlExists:
     def test_returns_true_on_200(self):
         resp = MagicMock()
         resp.status_code = 200
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.head", return_value=resp):
             assert _url_exists("https://example.com/sitemap.xml") is True
 
     def test_returns_false_on_404(self):
         resp = MagicMock()
         resp.status_code = 404
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.head", return_value=resp):
             assert _url_exists("https://example.com/sitemap.xml") is False
 
     def test_returns_false_on_timeout(self):
-        with patch("scraper.web_analyzer.socket.getaddrinfo", return_value=PUBLIC), \
+        with patch("scraper.net_guard.socket.getaddrinfo", return_value=PUBLIC), \
              patch("scraper.web_analyzer.requests.head", side_effect=requests.Timeout):
             assert _url_exists("https://example.com/sitemap.xml") is False
 

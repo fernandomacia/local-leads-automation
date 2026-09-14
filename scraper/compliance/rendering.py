@@ -15,6 +15,7 @@ import logging
 from playwright.sync_api import sync_playwright
 
 from config import RENDER_TIMEOUT_MS
+from scraper.net_guard import host_ok
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,11 @@ def render(url: str) -> str | None:
     Never raises: this is a best-effort second opinion, and a browser failure
     must not cost the lead its whole analysis.
     """
+    # Checked here rather than trusted from the caller: a browser is the worst
+    # client to hand an unvalidated URL, since it follows redirects and loads
+    # subresources on its own, reaching hosts this code never sees.
+    if not host_ok(url):
+        return None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -46,6 +52,10 @@ def render(url: str) -> str | None:
                     # otherwise fully built; take whatever has loaded so far. The
                     # size check below is what separates that from a failed load.
                     pass
+                # Chromium resolves redirects itself, so where it ended up is
+                # checked before its DOM is trusted.
+                if not host_ok(page.url):
+                    return None
                 try:
                     page.mouse.wheel(0, _SCROLL_PIXELS)
                     page.wait_for_timeout(_SETTLE_MS)

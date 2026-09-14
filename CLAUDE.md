@@ -24,6 +24,7 @@ scraper/
   maps_scraper.py            # Extracts lead, website, phone, address from Google Maps
                               # scrape() for ad-hoc use; scrape_incrementally() for worker.py
   web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring, is_contactable()
+  net_guard.py               # SSRF guard shared by the HTTP fetches and the browser fallback
   compliance/                # Legal audit package — detect_compliance() returns issues + details
     vocabulary.py            # Multilingual lexicon + URL slugs (data only)
     matching.py              # Normalization, word-boundary matching, slug/path matching, site language
@@ -139,6 +140,15 @@ def analyze_website(url: str) -> dict:
 - The Playwright fallback only fires when *no* legal link is found in any
   language, and its output is discarded if the DOM comes back under 500 chars —
   an empty render would turn every check into a finding.
+- Every URL built from an href on the analyzed page goes through
+  `net_guard.host_ok` before it is requested, the browser fallback included: a
+  link on an untrusted page is an untrusted URL. Links to a host known to be
+  internal are dropped at resolution, so the address never reaches the panel
+  either. A host that merely fails to resolve is *not* internal — dropping those
+  would turn a transient DNS failure into a "document never published" finding.
+- `run_analysis_job` returns whether the audit needed a browser, and the worker
+  reports the tally per batch. That number, not the request count, is what sizes
+  the host: a lead that renders costs a Chromium process.
 - Adding an issue key means declaring it in the API's `ComplianceIssue` enum,
   which serves the panel's filter dropdown through `GET /compliance-issues`;
   labels themselves need no change on either side.

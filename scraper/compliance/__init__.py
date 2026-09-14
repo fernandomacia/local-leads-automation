@@ -118,26 +118,29 @@ def detect_compliance(html: str, soup, base_url: str, extra_soups=(), *,
             requirements that apply to regulated professions.
 
     Returns:
-        ``{"compliance_issues": {key: label}, "compliance_details": {...}}`` —
-        the issues as the customer reads them, and the evidence per document so
-        a finding can be defended when the owner disputes it.
+        ``compliance_issues`` as the customer reads them, ``compliance_details``
+        with the evidence per document so a finding can be defended when the
+        owner disputes it, and ``compliance_rendered`` — whether a browser was
+        needed, which is what the analysis costs in memory rather than requests.
     """
     html_lower = html.lower()
     soups = [soup, *extra_soups]
     language = detect_language(soup)
-    links = find_links(soups, language)
+    links = find_links(soups, language, base_url)
     banner_soup = soup
+    rendered = False
 
     # A footer built client-side is the main source of false "no legal notice"
     # findings. Having paid for a browser, the rendered DOM replaces the static
     # one for every check, not just for the links.
     if render and not any(links.values()):
-        if rendered := render(base_url):
-            banner_soup = BeautifulSoup(rendered, "html.parser")
+        if rendered_html := render(base_url):
+            rendered = True
+            banner_soup = BeautifulSoup(rendered_html, "html.parser")
             soups.append(banner_soup)
-            html_lower += rendered.lower()
+            html_lower += rendered_html.lower()
             language = language or detect_language(banner_soup)
-            links = find_links(soups, language)
+            links = find_links(soups, language, base_url)
 
     has_trackers = loads_trackers(html_lower)
     details = verify_documents(
@@ -169,4 +172,5 @@ def detect_compliance(html: str, soup, base_url: str, extra_soups=(), *,
 
     issues.update({k: COMPLIANCE_ISSUE_LABELS[k] for k in detect_form_consent(*soups)})
 
-    return {"compliance_issues": issues, "compliance_details": details}
+    return {"compliance_issues": issues, "compliance_details": details,
+            "compliance_rendered": rendered}

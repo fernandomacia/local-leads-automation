@@ -6,9 +6,7 @@ on-page SEO issues. Social-only URLs (Instagram, Facebook, etc.) are detected
 early and routed out without a full fetch.
 """
 
-import ipaddress
 import re
-import socket
 import warnings
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
@@ -19,6 +17,7 @@ from bs4 import BeautifulSoup
 
 from config import COMPLIANCE_RENDER_FALLBACK, COMPLIANCE_TIMEOUT, SOCIAL_DOMAINS
 from scraper.compliance import detect_compliance
+from scraper.net_guard import host_ok
 
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
@@ -89,34 +88,6 @@ def _best_email(emails: list[str], site_domain: str) -> str:
     return (own or clean)[0]
 
 
-def _is_public_host(host: str) -> bool:
-    """Return True only if every address the host resolves to is globally routable.
-
-    Rejects private, loopback, link-local, reserved, and multicast ranges to
-    prevent SSRF against cloud metadata endpoints or internal services.
-    """
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
-    if not infos:
-        return False
-    for _, _, _, _, (addr, *_) in infos:
-        ip = ipaddress.ip_address(addr)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return False
-    return True
-
-
-def _host_ok(url: str) -> bool:
-    """Return True if the URL's host resolves to a public IP."""
-    try:
-        host = urlparse(url).hostname
-        return bool(host) and _is_public_host(host)
-    except Exception:
-        return False
-
-
 def _fetch(url: str) -> tuple[str, BeautifulSoup, str, bool] | None:
     """Fetch a URL and return ``(raw_html, soup, final_url, invalid_ssl)``.
 
@@ -125,7 +96,7 @@ def _fetch(url: str) -> tuple[str, BeautifulSoup, str, bool] | None:
     ``final_url`` is ``resp.url`` after redirects.
     Returns ``None`` on any unrecoverable failure.
     """
-    if not _host_ok(url):
+    if not host_ok(url):
         return None
     invalid_ssl = False
     try:
@@ -144,7 +115,7 @@ def _fetch(url: str) -> tuple[str, BeautifulSoup, str, bool] | None:
                 )
         resp.raise_for_status()
         # Guard against open-redirect chains landing on an internal host
-        if resp.url != url and not _host_ok(resp.url):
+        if resp.url != url and not host_ok(resp.url):
             return None
         # Skip non-HTML responses (binary files, JSON APIs, etc.)
         ct = resp.headers.get("Content-Type", "")
@@ -171,7 +142,7 @@ def _fetch_legal_page(url: str) -> tuple[int, str | None] | None:
         but its content cannot be validated. ``None`` when the request failed at
         the network level, which is distinct from a 404.
     """
-    if not _host_ok(url):
+    if not host_ok(url):
         return None
     try:
         with warnings.catch_warnings():
@@ -180,7 +151,7 @@ def _fetch_legal_page(url: str) -> tuple[int, str | None] | None:
                 url, timeout=(COMPLIANCE_TIMEOUT, COMPLIANCE_TIMEOUT), headers=HEADERS,
                 allow_redirects=True, verify=False, stream=True,
             )
-        if resp.url != url and not _host_ok(resp.url):
+        if resp.url != url and not host_ok(resp.url):
             return None
         # Soft 404: a large share of WordPress installs redirect unknown paths to
         # the homepage with a 200. The page exists in the HTTP sense and in no other.
@@ -284,7 +255,7 @@ def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
 
 
 def _url_exists(url: str) -> bool:
-    if not _host_ok(url):
+    if not host_ok(url):
         return False
     try:
         with warnings.catch_warnings():

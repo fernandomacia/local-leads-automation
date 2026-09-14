@@ -179,8 +179,14 @@ def run_search_job(job: dict) -> int:
     return total
 
 
-def run_analysis_job(job: dict, idx: int = 0) -> None:
-    """Analyze a single lead's website and generate its outreach message."""
+def run_analysis_job(job: dict, idx: int = 0) -> bool:
+    """Analyze a single lead's website and generate its outreach message.
+
+    Returns:
+        Whether the compliance audit had to fall back to a browser. Counted by
+        the caller: a lead that renders costs a Chromium process, which is what
+        decides how much memory a host running this worker needs.
+    """
     counter = f" {idx}" if idx else ""
     _progress(f"[>] Analyzing{counter}")
     try:
@@ -191,6 +197,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
             "website": job["website"],
             "profession": job.get("profession", ""),
         })
+        rendered = bool(analysis.get("compliance_rendered"))
 
         cms = analysis.get("cms")
         maps = _maps_issues(job)
@@ -204,10 +211,10 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
         if cms == "unreachable":
             if not (job.get("phone") or job.get("email")):
                 report_analysis(job["id"], {"failed": True})
-                return
+                return rendered
             message = generate({**base_context, "has_website": True})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
-            return
+            return rendered
 
         if not job.get("website"):
             # Defensive, not reachable under the current API contract: a lead with no
@@ -219,10 +226,10 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
             # settles the lead so it stops holding its parent search open.
             if not (job.get("phone") or job.get("email")):
                 report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}, maps))
-                return
+                return rendered
             message = generate({**base_context, "has_website": False})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
-            return
+            return rendered
 
         # has_website comes from the analysis, not the raw job: analyze() blanks
         # "website" when the URL is a social profile, because a Facebook page is not a
@@ -232,6 +239,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
         # no-website scenario is the correct framing and the actual sales angle.
         message = generate({**base_context, "has_website": bool(analysis.get("website"))})
         report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
+        return rendered
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 402:
             search_id = job.get("lead_search_id")
@@ -252,6 +260,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> None:
             report_analysis(job["id"], {"failed": True})
         except Exception:
             pass
+    return False
 
 
 def main() -> None:
@@ -266,12 +275,16 @@ def main() -> None:
     print(f"[+] Worker started (v{APP_VERSION}) — API: {API_BASE_URL}")
     analysis_idx = 0
     analysis_total = 0
+    rendered_count = 0
     was_analyzing = False
 
     def _done_line() -> str:
         skipped = analysis_total - analysis_idx
         note = f", {skipped} skipped" if skipped > 0 else ""
-        return f"[+] Done ({analysis_idx} analyzed{note})"
+        # Reported because it is the one cost that is not a request: each of these
+        # leads launched a Chromium process, which is what sizes the host.
+        browser = f", {rendered_count} needed a browser" if rendered_count else ""
+        return f"[+] Done ({analysis_idx} analyzed{note}{browser})"
 
     while True:
         try:
@@ -281,11 +294,12 @@ def main() -> None:
                     was_analyzing = False
                 analysis_total = run_search_job(job)
                 analysis_idx = 0
+                rendered_count = 0
                 continue
             if job := claim_next_analysis_job():
                 analysis_idx += 1
                 was_analyzing = True
-                run_analysis_job(job, analysis_idx)
+                rendered_count += run_analysis_job(job, analysis_idx)
                 continue
             if was_analyzing:
                 _finish(_done_line())

@@ -621,3 +621,70 @@ class TestRenderFallback:
         result = _audit(TRACKER, render=lambda url: rendered)
         assert "cookie_banner_without_reject" in result["compliance_issues"]
         assert "no_cookie_banner" not in result["compliance_issues"]
+
+
+# ── untrusted hrefs (SSRF) ────────────────────────────────────────────────────
+
+class TestUntrustedLinkTargets:
+    """Hrefs come from the analyzed site, so every destination is untrusted input."""
+
+    INTERNAL = ["http://169.254.169.254/latest/meta-data/",   # cloud metadata
+                "http://127.0.0.1:8000/admin",
+                "http://192.168.1.1/",
+                "http://[::1]/"]
+
+    @pytest.mark.parametrize("href", INTERNAL)
+    def test_a_legal_link_to_an_internal_address_is_never_followed(self, href):
+        calls = []
+        _audit(f'<a href="{href}">Aviso legal</a>', fetch=_fetcher({}, calls))
+        assert not any(url.startswith(href[:20]) for url in calls)
+
+    @pytest.mark.parametrize("href", INTERNAL)
+    def test_an_internal_address_never_reaches_the_panel(self, href):
+        # found_url is rendered as a link for the agent to click: an address we
+        # refused to fetch must not be handed to their browser instead.
+        detail = _audit(f'<a href="{href}">Aviso legal</a>',
+                        fetch=_fetcher({}))["compliance_details"]["legal_notice"]
+        assert detail["found_url"] is None
+        assert not any(href in url for url in detail.get("checked_urls", []))
+
+    def test_the_document_is_still_probed_when_its_link_is_rejected(self):
+        # Dropping the link must not hand the site a way to skip the audit: the
+        # document is probed exactly as if it had never been linked.
+        pages = {f"{BASE}/aviso-legal": (200, _page(LEGAL_NOTICE_PAGE))}
+        detail = _audit('<a href="http://127.0.0.1/admin">Aviso legal</a>',
+                        fetch=_fetcher(pages))["compliance_details"]["legal_notice"]
+        assert detail["status"] == "unlinked"
+        assert detail["found_url"] == f"{BASE}/aviso-legal"
+
+    def test_a_legal_page_on_another_public_domain_is_still_followed(self):
+        # policies.python.org is the real case: the guard must reject internal
+        # hosts without rejecting legitimate cross-domain policies.
+        url = "https://policies.example.org/privacy"
+        detail = _audit(f'<a href="{url}">Privacy Policy</a>',
+                        fetch=_fetcher({url: (200, _page(PRIVACY_PAGE))})
+                        )["compliance_details"]["privacy_policy"]
+        assert detail["status"] == "ok"
+        assert detail["found_url"] == url
+
+
+class TestProbeBudgetEfficiency:
+    def test_probing_stops_once_the_server_stops_answering(self):
+        # Six paths per document at a full connect timeout each is the audit's
+        # worst case; a host that is down should not be charged for all of them.
+        calls = []
+        result = _audit("<html><body><h1>Inicio</h1></body></html>",
+                        fetch=lambda url: calls.append(url) or None)
+        assert len(calls) <= 4, f"kept probing a dead host: {calls}"
+        assert result["compliance_details"]["legal_notice"]["status"] == "unknown"
+
+    def test_an_isolated_failure_does_not_end_the_probe(self):
+        # A single flaky path is not a dead server: the document is still found.
+        pages = {f"{BASE}/aviso-legal-y-politica-de-privacidad": (200, _page(LEGAL_NOTICE_PAGE))}
+
+        def fetch(url):
+            return None if url.endswith("/legal") else pages.get(url, (404, None))
+
+        detail = _audit("<html><body><h1>Inicio</h1></body></html>",
+                        fetch=fetch)["compliance_details"]["legal_notice"]
+        assert detail["status"] == "unlinked"

@@ -25,15 +25,23 @@ Links are matched on visible text in every supported language *and* on URL
 slugs, because multilingual sites routinely keep one while translating the other.
 """
 
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+
+from scraper.net_guard import is_internal_host
 
 from .matching import contains_term, is_navigable, match_language, matches_slug, normalize
 from .page_content import is_substantive, missing_requirements
 from .vocabulary import DOCUMENT_SLUGS, DOCUMENT_TERMS, PROBE_PATHS
 
 DOCUMENTS = tuple(DOCUMENT_TERMS)
+
+# Consecutive network-level failures that end a document's probing. A server that
+# has stopped answering will not answer the remaining paths either, and each one
+# costs a full connect timeout — the probes are the most numerous requests the
+# audit makes, and the ones most likely to hit a host that is simply down.
+_MAX_CONSECUTIVE_FAILURES = 2
 
 
 class RequestBudget:
@@ -55,7 +63,27 @@ class RequestBudget:
         return True
 
 
-def _find_link(soups, document: str, language: str) -> tuple[str, str] | None:
+def _is_safe_target(href: str, base_url: str) -> bool:
+    """True when a link found on the page may be requested.
+
+    Hrefs come from the analyzed site, which is untrusted input: a page can link
+    its "legal notice" to 169.254.169.254 and have the worker fetch it, then show
+    the address in the panel for an agent to click. Same-host links need no
+    lookup — that host was validated before the homepage was fetched — so only
+    the genuinely cross-domain case (a policy hosted on iubenda, say) resolves.
+
+    Only hosts *known* to be internal are dropped. One that fails to resolve keeps
+    its link, so the fetch refuses it and the document ends up ``unknown`` rather
+    than being probed and reported as never published.
+    """
+    if not base_url:
+        return True
+    target = urljoin(base_url, href)
+    return (urlparse(target).hostname == urlparse(base_url).hostname
+            or not is_internal_host(target))
+
+
+def _find_link(soups, document: str, language: str, base_url: str = "") -> tuple[str, str] | None:
     """Return ``(href, matched_language)`` for the best link to the document.
 
     Candidates are ranked, because the broader terms ("protección de datos",
@@ -68,7 +96,7 @@ def _find_link(soups, document: str, language: str) -> tuple[str, str] | None:
     for soup in soups:
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if not is_navigable(href):
+            if not is_navigable(href) or not _is_safe_target(href, base_url):
                 continue
             matched = match_language(normalize(a.get_text(" ", strip=True)), terms, language)
             by_slug = matches_slug(href, slugs)
@@ -80,9 +108,14 @@ def _find_link(soups, document: str, language: str) -> tuple[str, str] | None:
     return (best[1], best[2]) if best else None
 
 
-def find_links(soups, language: str = "") -> dict[str, tuple[str, str] | None]:
-    """Resolve every document to its best link across all pages already fetched."""
-    return {document: _find_link(soups, document, language) for document in DOCUMENTS}
+def find_links(soups, language: str = "", base_url: str = "") -> dict[str, tuple[str, str] | None]:
+    """Resolve every document to its best link across all pages already fetched.
+
+    Links pointing at a non-public host are ignored, so the document is probed as
+    if it had never been linked. ``base_url`` is what makes that check possible;
+    without it no link is filtered.
+    """
+    return {document: _find_link(soups, document, language, base_url) for document in DOCUMENTS}
 
 
 def _page_text(html: str) -> str:
@@ -142,7 +175,7 @@ def _probe(document, base_url, language, fetch, budget, profession, max_probes: 
         return {"status": "unknown", "reason": "budget_exhausted", "checked_urls": [],
                 "found_url": None, "method": "probe"}
 
-    checked, answered = [], False
+    checked, answered, failures = [], False, 0
     for path in PROBE_PATHS[document][:max_probes]:
         if not budget.spend():
             # Out of budget mid-probe: we have not seen enough to claim the
@@ -153,8 +186,12 @@ def _probe(document, base_url, language, fetch, budget, profession, max_probes: 
         checked.append(url)
         response = fetch(url)
         if response is None:
+            failures += 1
+            if failures >= _MAX_CONSECUTIVE_FAILURES:
+                return {"status": "unknown", "reason": "unreachable", "checked_urls": checked,
+                        "found_url": None, "method": "probe"}
             continue
-        answered = True
+        answered, failures = True, 0
         status_code, html = response
         if status_code >= 400 or html is None:
             continue

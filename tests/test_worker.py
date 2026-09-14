@@ -6,7 +6,14 @@ from unittest.mock import patch
 
 import pytest
 
-from worker import _finish, _maps_issues, _progress, map_analysis_to_api_shape, map_to_api_shape
+from worker import (
+    _finish,
+    _maps_issues,
+    _progress,
+    map_analysis_to_api_shape,
+    map_to_api_shape,
+    run_analysis_job,
+)
 
 
 # ── map_to_api_shape ──────────────────────────────────────────────────────────
@@ -99,6 +106,11 @@ class TestMapAnalysisToApiShape:
     def test_compliance_details_omitted_when_site_not_analyzed(self):
         result = map_analysis_to_api_shape({"seo_score": None, "compliance_details": {}}, {}, {})
         assert "compliance_details" not in result
+
+    def test_internal_audit_flags_never_reach_the_api(self):
+        # compliance_rendered is worker telemetry, not part of the lead record.
+        analysis = {"seo_score": 70, "compliance_details": {}, "compliance_rendered": True}
+        assert "compliance_rendered" not in map_analysis_to_api_shape(analysis, {}, {})
 
     def test_maps_issues_forwarded_to_the_payload(self):
         maps = {"no_address": "Sin dirección en la ficha"}
@@ -207,3 +219,33 @@ class TestProgressOutput:
         )
         assert out == "[+] Done (2 analyzed)\n"
         assert "\r" not in out
+
+
+# ── run_analysis_job (browser accounting) ─────────────────────────────────────
+
+_JOB = {"id": "1", "business_name": "Ejemplo SL", "website": "https://ejemplo.es",
+        "phone": "965000000", "city": "Elche", "profession": "fontaneros"}
+
+
+class TestRenderAccounting:
+    """The count of leads that needed a browser is what sizes the host."""
+
+    def _run(self, analysis: dict) -> bool:
+        with patch("worker.analyze", return_value=analysis), \
+             patch("worker.generate", return_value={"subject": "s", "body": "b"}), \
+             patch("worker.report_analysis"):
+            return run_analysis_job(dict(_JOB))
+
+    def test_reports_a_lead_that_needed_a_browser(self):
+        assert self._run({"cms": "wordpress", "seo_score": 60, "compliance_rendered": True}) is True
+
+    def test_reports_a_lead_that_did_not(self):
+        assert self._run({"cms": "wordpress", "seo_score": 60}) is False
+
+    def test_an_unreachable_site_still_reports_its_browser_use(self):
+        assert self._run({"cms": "unreachable", "compliance_rendered": True}) is True
+
+    def test_a_failed_analysis_counts_no_browser(self):
+        with patch("worker.analyze", side_effect=RuntimeError("boom")), \
+             patch("worker.report_analysis"):
+            assert run_analysis_job(dict(_JOB)) is False
