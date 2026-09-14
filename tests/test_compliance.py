@@ -122,6 +122,17 @@ class TestMatching:
     def test_detect_language(self, html, expected):
         assert detect_language(_parse(html)) == expected
 
+    @pytest.mark.parametrize("lang", ["español", "1", "{{ site.lang }}", "", "   "])
+    def test_a_lang_attribute_that_is_not_a_language_tag_is_discarded(self, lang):
+        # Themes ship unrendered template variables and whole words in this
+        # attribute. The API takes a language tag or nothing, and rejects the
+        # report otherwise — which costs the lead its entire analysis.
+        assert detect_language(_parse(f'<html lang="{lang}"></html>')) == ""
+
+    def test_a_broken_lang_attribute_falls_through_to_the_next_source(self):
+        html = '<html lang="español"><meta property="og:locale" content="es_ES"></html>'
+        assert detect_language(_parse(html)) == "es"
+
     def test_declared_language_breaks_ties_between_lexicons(self):
         # "aviso legal" is Spanish, Galician and Portuguese at once; the site says
         # which one it is, and the message generator needs the right answer.

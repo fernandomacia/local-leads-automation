@@ -161,6 +161,12 @@ def analyze_website(url: str) -> dict:
   production.
 - `compliance_details` is sent on `PATCH /leads/{id}/analysis` alongside
   `compliance_issues` — the API must accept the field or it will 422.
+- The site's declared language travels as `compliance_language`, apart from the
+  per-document `language`, which is whichever lexicon matched that link. The API
+  validates it as `^[a-z]{2,8}$`, so `detect_language` discards anything that is
+  not a language tag: a theme's unrendered `{{ site.lang }}` would otherwise cost
+  the lead its whole analysis, since the worker answers an HTTP error with
+  `failed: true`.
 
 ### Outreach
 - Final sending is semi-manual (not mass automated) to comply with GDPR

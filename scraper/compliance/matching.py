@@ -26,6 +26,11 @@ _SEPARATOR = r"[\s\-_]+"
 # Path suffixes to drop before comparing a segment to a slug.
 _PAGE_EXTENSIONS = (".html", ".htm", ".php", ".asp", ".aspx", ".jsp")
 
+# A BCP-47 primary subtag. Anything else in a lang attribute is markup that never
+# rendered ("{{ site.lang }}") or a word where a code belongs ("español"), and the
+# API rejects it — which costs the lead its whole analysis, not just its language.
+_LANGUAGE_SUBTAG = re.compile(r"^[a-z]{2,8}$")
+
 # Minimum slug length allowed to match as a bare prefix. German and Dutch build
 # compounds without a separator ("datenschutzerklärung"), so a prefix rule is
 # needed — but only for slugs long enough that the match cannot be accidental.
@@ -120,17 +125,26 @@ def matches_slug(href: str, slugs: tuple[str, ...]) -> bool:
     )
 
 
+def _subtag(value: str) -> str:
+    """Reduce a language tag to its primary subtag, or "" if it is not one."""
+    subtag = value.strip().lower().replace("_", "-").split("-")[0]
+    return subtag if _LANGUAGE_SUBTAG.match(subtag) else ""
+
+
 def detect_language(soup) -> str:
     """Return the site's declared language as a primary subtag, or "".
 
-    Read from ``html[lang]``, then ``og:locale``, then the first ``hreflang``.
+    Read from ``html[lang]``, then ``og:locale``, then the first ``hreflang``,
+    taking the first that is actually a language tag: themes ship unrendered
+    template variables and whole words in that attribute often enough that
+    passing the value through unchecked is how a lead gets rejected downstream.
+
     Used to prioritize a lexicon (never to restrict it) and to tell the message
     generator which language to write the outreach email in.
     """
-    if (html := soup.find("html")) and (lang := html.get("lang")):
-        return lang.strip().lower().replace("_", "-").split("-")[0]
-    if (meta := soup.find("meta", attrs={"property": "og:locale"})) and (content := meta.get("content")):
-        return content.strip().lower().replace("_", "-").split("-")[0]
-    if (link := soup.find("link", attrs={"hreflang": True})) and (hreflang := link.get("hreflang")):
-        return hreflang.strip().lower().split("-")[0]
-    return ""
+    candidates = (
+        (html.get("lang") if (html := soup.find("html")) else None),
+        (meta.get("content") if (meta := soup.find("meta", attrs={"property": "og:locale"})) else None),
+        (link.get("hreflang") if (link := soup.find("link", attrs={"hreflang": True})) else None),
+    )
+    return next((subtag for value in candidates if value and (subtag := _subtag(value))), "")
