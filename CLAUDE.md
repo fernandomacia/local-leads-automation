@@ -22,7 +22,7 @@ Google Maps → extract businesses
 worker.py                    # Daemon: polls SegurSEO-API job queues, drives scraping/analysis
 scraper/
   maps_scraper.py            # Extracts lead, website, phone, address from Google Maps
-                              # scrape() for ad-hoc use; scrape_incrementally() for worker.py
+                              # scrape_incrementally(): one card at a time, for worker.py
   web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring, is_contactable()
   net_guard.py               # SSRF guard shared by the HTTP fetches and the browser fallback
   compliance/                # Legal audit package — detect_compliance() returns issues + details
@@ -115,7 +115,7 @@ def analyze_website(url: str) -> dict:
 
 ### Scraping
 - Use `time.sleep()` with realistic values (3–6s between actions), never less
-- Pass `max_results=N` to `scrape()` or `scrape_incrementally()` to limit results during testing
+- Pass `max_results=N` to `scrape_incrementally()` to limit results during testing
 - `scrape_incrementally()` opens each listing in its own tab (`context.new_page()`)
   but shares one `browser.new_context()` with the results-list tab — separate
   contexts (e.g. `browser.new_page()`) don't share consent cookies, so every

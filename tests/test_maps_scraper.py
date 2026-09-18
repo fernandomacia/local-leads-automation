@@ -124,10 +124,15 @@ class TestExtractBusiness:
         assert result["address"] == "Calle Mayor 1"
 
     def test_address_without_zipcode_uses_default_city(self):
+        # Asserted as equality, not containment: the fallback used to arrive as
+        # "**Valencia**", and `in` is what let that pass. The asterisks were meant to mark
+        # the value as inferred, but nothing read them and they travelled into leads.city,
+        # where the panel sorted the lead under `*` and showed an agent the markup.
         page = _make_page(address_raw="Calle Sin Codigo Postal")
         result = _extract_business(page, "Valencia")
+        assert result["city"] == "Valencia"
+        # An unparsed address is legible without a marker: these two are what say so.
         assert result["zip_code"] == ""
-        assert "Valencia" in result["city"]
         assert result["province"] == ""
 
     def test_leading_icon_chars_stripped_from_address(self):

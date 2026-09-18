@@ -130,42 +130,18 @@ def _scroll_feed(page: Page) -> None:
     time.sleep(_get_delay(DELAY_SCROLL_AFTER_EXTRACT))
 
 
-def _collect_hrefs(page: Page, max_results: int | None = None) -> list[str]:
-    """Scroll the results feed and collect all business URLs without opening cards.
-
-    Scrolls the results feed — only reliable while no card panel is open.
-    Stops when ``max_results`` is reached or ``MAX_IDLE_SCROLLS`` consecutive
-    scrolls yield nothing new. Returns a deduplicated list capped at ``max_results``.
-    """
-    seen: set[str] = set()
-    no_new_count = 0
-
-    while True:
-        new = [h for h in _visible_listing_hrefs(page) if h not in seen]
-        seen.update(new)
-
-        if max_results and len(seen) >= max_results:
-            break
-
-        _scroll_feed(page)
-
-        if new:
-            no_new_count = 0
-        else:
-            no_new_count += 1
-            if no_new_count >= MAX_IDLE_SCROLLS:
-                break
-
-    hrefs = list(seen)
-    return hrefs[:max_results] if max_results else hrefs
-
-
 def _extract_business(page: Page, default_city: str = "") -> dict:
     """Extract structured business data from an open Google Maps place page.
 
-    Address parsing targets the Spanish postal format: "Street, CP City, Province".
-    When the zip code is absent and a default_city is provided, city is stored as
-    ``**city**`` to signal that the value was inferred rather than parsed.
+    Address parsing targets the Spanish postal format: "Street, CP City, Province". When
+    the zip code is absent, the city falls back to the one that was searched for.
+
+    That fallback used to be wrapped in asterisks — ``**Elche**`` — to mark it as inferred
+    rather than parsed. Nothing ever read the marker: not this worker, not the API, not the
+    panel. What it did do was travel into ``leads.city`` and stay there, so a lead sorted
+    under ``*`` on the panel's city column and an agent opening the lead read the asterisks.
+    The inference is legible without it anyway, and more precisely: an unparsed address is
+    exactly the row whose ``zip_code`` and ``province`` came back empty.
     """
     name = page.locator(SELECTOR_NAME).inner_text()
 
@@ -187,7 +163,7 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
         province = location_match.group(2).strip()
     else:
         zip_code = ""
-        city = f"**{default_city}**" if default_city else ""
+        city = default_city
         province = ""
 
     street_match = re.match(r'^(.+?),?\s*\b\d{5}\b', full_address)
@@ -287,37 +263,6 @@ def _normalize_domain(url: str) -> str:
     return _to_ascii(host.rstrip(".").lower().removeprefix("www."))
 
 
-def scrape(profession: str, city: str, headless: bool = False, max_results: int | None = None) -> list[dict]:
-    """Scrape business listings from Google Maps for a given profession and city.
-
-    Args:
-        profession: Search term for the type of business (e.g., ``"abogados"``).
-        city: City to search in (e.g., ``"Elche"``).
-        headless: Run the browser without a visible window.
-        max_results: Maximum number of listings to collect. ``None`` collects all.
-
-    Returns:
-        List of dicts with keys: ``lead``, ``website``, ``phone``, ``address``,
-        ``zip_code``, ``city``, ``province``, ``maps_url``.
-    """
-    with sync_playwright() as p:
-        browser, _, page = _start_search(p, profession, city, headless)
-        try:
-            hrefs = _collect_hrefs(page, max_results)
-            leads = []
-            for href in hrefs:
-                lead = _extract_with_retries(page, href, city)
-                if lead is not None:
-                    leads.append(lead)
-            return leads
-        finally:
-            # Belt and braces, matching scrape_incrementally: sync_playwright()'s
-            # __exit__ already stops the driver — and the browsers it spawned — on
-            # any exception, Ctrl+C included, so this closes at the point of failure
-            # rather than adding cleanup that was otherwise missing.
-            browser.close()
-
-
 def scrape_incrementally(
     profession: str,
     city: str,
@@ -327,12 +272,11 @@ def scrape_incrementally(
 ):
     """Yield business listings one at a time as they're discovered on Google Maps.
 
-    Unlike ``scrape()``, this never collects the full results list upfront —
-    it scrolls in waves, extracting each newly visible card as it appears, which
-    lets a worker process leads (and report them in batches) as they're found
-    instead of waiting for the whole search to finish. Each card is extracted in
-    a disposable tab so the results feed itself never navigates away and loses
-    its scroll position.
+    Never collects the full results list upfront: it scrolls in waves, extracting each
+    newly visible card as it appears, which lets the worker report leads in batches as they
+    are found instead of waiting for the whole search to finish. Each card is extracted in
+    a disposable tab so the results feed itself never navigates away and loses its scroll
+    position.
 
     Args:
         profession: Search term for the type of business.
@@ -351,7 +295,8 @@ def scrape_incrementally(
             is the only place the website comes from.
 
     Yields:
-        Lead dicts with the same shape as ``scrape()``'s results, one at a time.
+        Lead dicts, one at a time, with keys: ``lead``, ``website``, ``phone``,
+        ``address``, ``zip_code``, ``city``, ``province``, ``maps_url``.
     """
     is_known = is_known or (lambda domain: False)
 
