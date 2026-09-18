@@ -13,7 +13,7 @@ import time
 import requests
 
 from config import API_BASE_URL, APP_VERSION, BATCH_SIZE, HEADLESS, POLL_INTERVAL, SOCIAL_DOMAINS
-from scraper.maps_scraper import scrape_incrementally, MAPS_ISSUES
+from scraper.maps_scraper import scrape_incrementally, maps_card_issues
 from scraper.web_analyzer import analyze
 from ai.message_generator import generate
 from api.client import (
@@ -49,18 +49,14 @@ def _finish(text: str) -> None:
     print((f"\r{text}" + " " * 10) if sys.stdout.isatty() else text)
 
 
-def _maps_issues(job: dict) -> dict[str, str]:
-    """Return Maps card issues for fields missing from the job payload."""
-    return {k: label for k, (field, label) in MAPS_ISSUES.items() if not job.get(field)}
-
-
 def map_to_api_shape(lead: dict) -> dict:
     """Map a scraped lead to the ``POST /jobs/{id}/leads`` payload shape.
 
-    Optional fields are omitted when empty rather than sent as "". Sending ""
-    relies on ConvertEmptyStringsToNull being in the middleware stack; omitting
-    the key is correct regardless of server configuration and keeps the batch
-    rows homogeneous, which the bulk INSERT requires.
+    Optional fields are omitted when empty rather than sent as "". Sending "" relies on
+    ConvertEmptyStringsToNull being in the middleware stack, while omitting the key is
+    correct regardless of server configuration. It does leave the batch rows
+    heterogeneous — different rows carrying different keys — which the API pads for
+    itself before the bulk INSERT, and is the reason it has to.
     """
     payload: dict = {"business_name": lead.get("lead", "")}
     for api_key, lead_key in [
@@ -74,20 +70,23 @@ def map_to_api_shape(lead: dict) -> dict:
     ]:
         if value := lead.get(lead_key):
             payload[api_key] = value
+
+    # Always sent, {} included: this is the only moment the Maps card is in front of us,
+    # and the API accepts it here and nowhere else. {} says the card was complete; NULL
+    # is reserved for a lead no worker has reported on.
+    payload["maps_issues"] = maps_card_issues(lead)
+
     return payload
 
 
-def map_analysis_to_api_shape(analysis: dict, message: dict, maps_issues: dict) -> dict:
+def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
     """Map web-analyzer output and a generated message to the analysis PATCH shape.
 
     Every field is optional on the API side, so only populated values are sent.
 
-    Args:
-        maps_issues: Google Maps listing gaps from ``_maps_issues``. Required
-            rather than defaulting, because these findings reach the customer
-            through the generated pitch and the agent has to be able to check
-            them against the panel — silently omitting them is the failure this
-            parameter exists to prevent.
+    **No ``maps_issues`` here.** The API drops the key on this endpoint rather than
+    refusing it, so sending it looked like it worked and wrote nothing. It belongs to the
+    ingest, where the card is actually read — see ``maps_card_issues``.
     """
     payload = {}
     if analysis.get("cms"):
@@ -118,12 +117,6 @@ def map_analysis_to_api_shape(analysis: dict, message: dict, maps_issues: dict) 
             payload["compliance_checked_at"] = checked_at
     if analysis.get("seo_issues"):
         payload["seo_issues"] = analysis["seo_issues"]
-
-    # Sent unconditionally, {} included, unlike compliance_issues above. These come
-    # from the job payload rather than from fetching the site, so they are known
-    # whether or not the website loaded: {} genuinely means "the listing is complete",
-    # and NULL stays exclusive to "the worker never processed this lead".
-    payload["maps_issues"] = maps_issues
 
     if message.get("subject"):
         payload["email_subject"] = message["subject"]
@@ -205,7 +198,10 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
         rendered = bool(analysis.get("compliance_rendered"))
 
         cms = analysis.get("cms")
-        maps = _maps_issues(job)
+        # Read back as the ingest recorded it. The API serves it on GET /leads/next for
+        # exactly this, and a lead ingested before it was reported carries NULL — which
+        # is "unknown", so the pitch simply makes no Maps argument.
+        maps = job.get("maps_issues") or {}
         base_context = {
             **analysis,
             "city": job.get("city", ""),
@@ -218,7 +214,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
                 report_analysis(job["id"], {"failed": True})
                 return rendered
             message = generate({**base_context, "has_website": True})
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
             return rendered
 
         if not job.get("website"):
@@ -230,10 +226,10 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
             # a pitch with no way to deliver it; reporting an empty message instead
             # settles the lead so it stops holding its parent search open.
             if not (job.get("phone") or job.get("email")):
-                report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}, maps))
+                report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
                 return rendered
             message = generate({**base_context, "has_website": False})
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
+            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
             return rendered
 
         # has_website comes from the analysis, not the raw job: analyze() blanks
@@ -243,7 +239,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
         # of which there are none, since a social URL yields an empty analysis. The
         # no-website scenario is the correct framing and the actual sales angle.
         message = generate({**base_context, "has_website": bool(analysis.get("website"))})
-        report_analysis(job["id"], map_analysis_to_api_shape(analysis, message, maps))
+        report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
         return rendered
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 402:

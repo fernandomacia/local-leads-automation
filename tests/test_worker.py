@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
+from scraper.maps_scraper import maps_card_issues
 from worker import (
     _finish,
-    _maps_issues,
     _progress,
     map_analysis_to_api_shape,
     map_to_api_shape,
@@ -39,103 +39,110 @@ class TestMapToApiShape:
         result = map_to_api_shape({"lead": "Mi Empresa"})
         assert result["business_name"] == "Mi Empresa"
 
+    def test_maps_issues_travel_with_the_ingest(self):
+        # The one moment the card is in front of us, and the only endpoint the API
+        # accepts this on. Reported with the analysis instead, it was discarded.
+        result = map_to_api_shape({"lead": "Sin nada", "phone": "965123456"})
+        assert result["maps_issues"] == {
+            "no_website": "Sin sitio web en Google Maps",
+            "no_address": "Sin dirección en Google Maps",
+        }
+
+    def test_a_complete_card_sends_an_empty_object_not_nothing(self, sample_lead):
+        # {} says "the card was complete"; omitting the key would leave NULL, which the
+        # API reads as "no worker has reported on this lead".
+        assert map_to_api_shape(sample_lead)["maps_issues"] == {}
+
 
 # ── map_analysis_to_api_shape ─────────────────────────────────────────────────
 
 class TestMapAnalysisToApiShape:
     def test_phone_script_always_present(self):
-        result = map_analysis_to_api_shape({}, {}, {})
+        result = map_analysis_to_api_shape({}, {})
         assert "phone_script" in result
         assert result["phone_script"] == ""
 
     def test_empty_phone_script_sent_not_omitted(self):
-        result = map_analysis_to_api_shape({}, {"phone_script": ""}, {})
+        result = map_analysis_to_api_shape({}, {"phone_script": ""})
         assert result["phone_script"] == ""
 
     def test_cms_omitted_when_empty(self):
-        result = map_analysis_to_api_shape({"cms": ""}, {}, {})
+        result = map_analysis_to_api_shape({"cms": ""}, {})
         assert "cms" not in result
 
     def test_cms_included_when_set(self):
-        result = map_analysis_to_api_shape({"cms": "wordpress"}, {}, {})
+        result = map_analysis_to_api_shape({"cms": "wordpress"}, {})
         assert result["cms"] == "wordpress"
 
     def test_seo_score_zero_included(self):
         # seo_score=0 is a valid value — must not be omitted by falsy check
-        result = map_analysis_to_api_shape({"seo_score": 0}, {}, {})
+        result = map_analysis_to_api_shape({"seo_score": 0}, {})
         assert result["seo_score"] == 0
 
     def test_seo_score_none_omitted(self):
-        result = map_analysis_to_api_shape({"seo_score": None}, {}, {})
+        result = map_analysis_to_api_shape({"seo_score": None}, {})
         assert "seo_score" not in result
 
     def test_compliance_issues_included_when_analyzed(self):
         analysis = {"seo_score": 70, "compliance_issues": {"no_cookie_banner": "Sin aviso"}}
-        result = map_analysis_to_api_shape(analysis, {}, {})
+        result = map_analysis_to_api_shape(analysis, {})
         assert result["compliance_issues"] == {"no_cookie_banner": "Sin aviso"}
 
     def test_empty_compliance_issues_sent_not_omitted(self):
         # {} means "analyzed and clean" — omitting it would leave NULL, which the
         # platform renders as "not analyzed"
-        result = map_analysis_to_api_shape({"seo_score": 90, "compliance_issues": {}}, {}, {})
+        result = map_analysis_to_api_shape({"seo_score": 90, "compliance_issues": {}}, {})
         assert result["compliance_issues"] == {}
 
     def test_compliance_issues_omitted_when_site_not_analyzed(self):
         # Unreachable/social/no-website leads carry seo_score None; claiming {} there
         # would render an unchecked site as compliant
-        result = map_analysis_to_api_shape({"seo_score": None, "compliance_issues": {}}, {}, {})
+        result = map_analysis_to_api_shape({"seo_score": None, "compliance_issues": {}}, {})
         assert "compliance_issues" not in result
 
     def test_compliance_details_ride_along_with_the_issues(self):
         details = {"legal_notice": {"status": "missing", "found_url": None, "method": "link"}}
         analysis = {"seo_score": 70, "compliance_issues": {}, "compliance_details": details}
-        assert map_analysis_to_api_shape(analysis, {}, {})["compliance_details"] == details
+        assert map_analysis_to_api_shape(analysis, {})["compliance_details"] == details
 
     def test_site_language_rides_along_with_the_issues(self):
         analysis = {"seo_score": 70, "compliance_details": {}, "compliance_language": "ca"}
-        assert map_analysis_to_api_shape(analysis, {}, {})["compliance_language"] == "ca"
+        assert map_analysis_to_api_shape(analysis, {})["compliance_language"] == "ca"
 
     def test_site_language_omitted_when_the_site_declares_none(self):
         analysis = {"seo_score": 70, "compliance_details": {}, "compliance_language": ""}
-        assert "compliance_language" not in map_analysis_to_api_shape(analysis, {}, {})
+        assert "compliance_language" not in map_analysis_to_api_shape(analysis, {})
 
     def test_compliance_checked_at_is_forwarded(self):
         analysis = {"seo_score": 70, "compliance_details": {},
                     "compliance_checked_at": "2026-09-12T08:30:00+00:00"}
-        result = map_analysis_to_api_shape(analysis, {}, {})
+        result = map_analysis_to_api_shape(analysis, {})
         assert result["compliance_checked_at"] == "2026-09-12T08:30:00+00:00"
 
     def test_compliance_checked_at_omitted_when_the_audit_never_ran(self):
         # NULL is the panel's "never audited"; a timestamp with no audit behind it
         # would date a finding that was never made.
-        result = map_analysis_to_api_shape({"seo_score": 70, "compliance_details": {}}, {}, {})
+        result = map_analysis_to_api_shape({"seo_score": 70, "compliance_details": {}}, {})
         assert "compliance_checked_at" not in result
 
     def test_compliance_details_omitted_when_site_not_analyzed(self):
-        result = map_analysis_to_api_shape({"seo_score": None, "compliance_details": {}}, {}, {})
+        result = map_analysis_to_api_shape({"seo_score": None, "compliance_details": {}}, {})
         assert "compliance_details" not in result
 
     def test_internal_audit_flags_never_reach_the_api(self):
         # compliance_rendered is worker telemetry, not part of the lead record.
         analysis = {"seo_score": 70, "compliance_details": {}, "compliance_rendered": True}
-        assert "compliance_rendered" not in map_analysis_to_api_shape(analysis, {}, {})
+        assert "compliance_rendered" not in map_analysis_to_api_shape(analysis, {})
 
-    def test_maps_issues_forwarded_to_the_payload(self):
-        maps = {"no_address": "Sin dirección en la ficha"}
-        result = map_analysis_to_api_shape({"seo_score": 70}, {}, maps)
-        assert result["maps_issues"] == maps
+    def test_maps_issues_never_sent_with_the_analysis(self):
+        # The API drops the key on this endpoint, so sending it wrote nothing while
+        # looking like it worked. It travels with the ingest instead.
+        result = map_analysis_to_api_shape({"seo_score": 70}, {})
+        assert "maps_issues" not in result
 
-    def test_empty_maps_issues_sent_not_omitted(self):
-        # {} means "the listing is complete", a real finding the agent needs to see;
-        # omitting it would leave NULL, which reads as "never processed"
-        result = map_analysis_to_api_shape({"seo_score": 70}, {}, {})
-        assert result["maps_issues"] == {}
-
-    def test_maps_issues_sent_even_when_the_site_was_never_fetched(self):
-        # Unlike compliance_issues, these come from the job payload, not from the
-        # fetch, so an unreachable site still has a known Maps listing state
-        result = map_analysis_to_api_shape({"seo_score": None}, {}, {"no_website": "Sin web"})
-        assert result["maps_issues"] == {"no_website": "Sin web"}
+    def test_maps_issues_not_sent_even_when_the_site_was_never_fetched(self):
+        result = map_analysis_to_api_shape({"seo_score": None}, {})
+        assert "maps_issues" not in result
         assert "compliance_issues" not in result
 
     def test_social_networks_grouped_and_filtered(self):
@@ -147,45 +154,54 @@ class TestMapAnalysisToApiShape:
             "twitter": "",
             "tiktok": "",
         }
-        result = map_analysis_to_api_shape(analysis, {}, {})
+        result = map_analysis_to_api_shape(analysis, {})
         assert result["social_networks"] == {"instagram": "https://instagram.com/test"}
 
     def test_no_socials_omits_social_networks_key(self):
         analysis = {k: "" for k in ("instagram", "facebook", "youtube", "linkedin", "twitter", "tiktok")}
-        result = map_analysis_to_api_shape(analysis, {}, {})
+        result = map_analysis_to_api_shape(analysis, {})
         assert "social_networks" not in result
 
     def test_subject_and_body_included(self):
         message = {"subject": "Asunto", "body": "Cuerpo", "phone_script": "Script"}
-        result = map_analysis_to_api_shape({}, message, {})
+        result = map_analysis_to_api_shape({}, message)
         assert result["email_subject"] == "Asunto"
         assert result["email_body"] == "Cuerpo"
         assert result["phone_script"] == "Script"
 
 
-# ── _maps_issues ──────────────────────────────────────────────────────────────
+# ── maps_card_issues ──────────────────────────────────────────────────────────
 
-class TestMapsIssues:
+class TestMapsCardIssues:
     def test_all_fields_missing_returns_all_issues(self):
-        job = {"website": "", "phone": "", "address": ""}
-        issues = _maps_issues(job)
+        lead = {"website": "", "phone": "", "address": ""}
+        issues = maps_card_issues(lead)
         assert set(issues.keys()) == {"no_website", "no_phone", "no_address"}
 
     def test_all_fields_present_returns_empty(self):
-        job = {"website": "https://example.com", "phone": "965123456", "address": "Calle 1"}
-        assert _maps_issues(job) == {}
+        lead = {"website": "https://example.com", "phone": "965123456", "address": "Calle 1"}
+        assert maps_card_issues(lead) == {}
 
     def test_only_website_missing(self):
-        job = {"website": "", "phone": "965123456", "address": "Calle 1"}
-        issues = _maps_issues(job)
+        lead = {"website": "", "phone": "965123456", "address": "Calle 1"}
+        issues = maps_card_issues(lead)
         assert list(issues.keys()) == ["no_website"]
 
     def test_issue_values_are_human_readable_labels(self):
-        job = {"website": "", "phone": "", "address": ""}
-        issues = _maps_issues(job)
+        issues = maps_card_issues({"website": "", "phone": "", "address": ""})
         for label in issues.values():
             assert isinstance(label, str)
             assert len(label) > 0
+
+    def test_read_from_the_scraped_card_not_from_a_later_job(self):
+        # The bug this whole arrangement exists for: an agent supplies a website through
+        # the panel for a business whose card had none. The card said no_website and the
+        # job no longer does, so the reading has to be taken at ingest and kept.
+        card = {"website": "", "phone": "965123456", "address": "Calle 1"}
+        job_after_the_agent_typed_a_url = {**card, "website": "https://escrita-a-mano.es"}
+
+        assert maps_card_issues(card) == {"no_website": "Sin sitio web en Google Maps"}
+        assert maps_card_issues(job_after_the_agent_typed_a_url) == {}
 
 
 # ── Terminal progress output ──────────────────────────────────────────────────

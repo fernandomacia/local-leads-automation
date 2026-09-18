@@ -125,6 +125,27 @@ def analyze_website(url: str) -> dict:
   exhausted search doesn't scroll forever. Known (skipped) leads reset the
   counter — only a truly empty scroll wave counts as idle.
 
+### Reporting to the API
+
+- **A reading is sent where it is taken.** `maps_issues` goes with the ingest batch,
+  while the Maps card is in front of the scraper, and no later step may write it. Reported
+  with the analysis instead — which is what this worker did until 2.4.0 — the one finding
+  it exists for was the one it lost: an agent supplies a website through the panel for a
+  business whose card had none, the worker then reads a job *with* a website, and "no
+  website on the listing" silently becomes "the listing was complete". Compute it from the
+  scraped card (`maps_card_issues`), never from the job the API hands back.
+- **The API drops a key it does not accept rather than refusing it.** That is deliberate
+  on its side — a 422 on the analysis report makes this worker answer `failed: true` and
+  abandon the lead — but it means a misplaced field looks like it worked and writes
+  nothing. Before adding a field to either payload, check which endpoint accepts it.
+- **`{}` and `None` are different answers.** An empty dict is a finding: the card was
+  complete, the site was audited and clean. `None` means no worker has reported yet. Never
+  omit a key to mean "nothing found", and never send `{}` for something that was not
+  checked.
+- **The version is the contract.** `APP_VERSION` is what the API's Compatibility table
+  keys its worker requirements to, so a change to what this worker sends or reads bumps
+  it in the same commit.
+
 ### Compliance auditing
 - Bias is asymmetric on purpose: a false positive is read out loud to a business
   owner as "you are breaking the law". Anything ambiguous resolves to compliant,

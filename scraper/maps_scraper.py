@@ -50,6 +50,23 @@ MAPS_ISSUES: dict[str, tuple[str, str]] = {
 }
 
 
+def maps_card_issues(lead: dict) -> dict[str, str]:
+    """Return what this business's Google Maps card is missing.
+
+    Read here, from the scraped card, and reported with the ingest batch — never
+    re-derived later. The analysis step used to compute it from the job the API handed
+    back, which loses the one finding it exists for: an agent supplies a website through
+    the panel for a business whose card had none, the worker then sees a job *with* a
+    website, and "no website on the listing" silently becomes "the listing was complete".
+    The overwrite was invisible because it was a well-formed reading of the wrong thing.
+
+    An empty dict is a real answer — the card is complete — and is what makes NULL on the
+    API side mean "no worker has reported on this lead", so callers must send it as it
+    comes rather than omitting it when empty.
+    """
+    return {key: label for key, (field, label) in MAPS_ISSUES.items() if not lead.get(field)}
+
+
 def _get_delay(base_delay: float) -> float:
     """Return base_delay with ±JITTER_RANGE% random variance to mimic human timing."""
     variance = base_delay * JITTER_RANGE
