@@ -37,7 +37,7 @@ scraper/
 ai/
   message_generator.py       # Generates personalized outreach emails via OpenRouter API
 api/
-  client.py                  # SegurSEO-API job-queue client: claim/report/complete/fail endpoints
+  client.py                  # SegurSEO-API job-queue client: every call through one _request()
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
 ```
 

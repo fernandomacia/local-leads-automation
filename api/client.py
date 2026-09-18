@@ -8,7 +8,12 @@ import requests
 
 from config import API_BASE_URL, API_TOKEN
 
-_HEADERS = {"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"}
+_TIMEOUT = 30
+
+# One connection, reused. The worker asks about every business it extracts — one request
+# per Maps card — so a fresh connection per question would be a TLS handshake per card.
+_SESSION = requests.Session()
+_SESSION.headers.update({"Authorization": f"Bearer {API_TOKEN}", "Content-Type": "application/json"})
 
 # The API caps the failure message it stores. A Playwright traceback passes that easily, and
 # the resulting 422 used to be swallowed by the caller — leaving the search claimed instead
@@ -26,40 +31,38 @@ class ReportRejected(requests.HTTPError):
     """
 
 
-def _raise_with_body(resp: requests.Response, label: str, error=requests.HTTPError) -> None:
-    """Raise with the response body attached.
+def _request(method: str, path: str, *, json=None, error=requests.HTTPError) -> requests.Response:
+    """Send one worker-contract request, or raise with the response body attached.
 
-    ``raise_for_status()`` swallows it, and the body is the only place the API says *which*
-    field it refused — on a 422 the status alone leaves nothing to act on.
+    The base URL, the token, the timeout and the failure handling were repeated in ten
+    functions, and only one of them attached the body on a failure — the one whose 422
+    somebody had had to diagnose. That is the wrong way round: the body is where the API
+    names the field it refused, and ``raise_for_status()`` throws it away, so a 422 arrived
+    as a status with nothing to act on. Every call carries it now.
     """
-    raise error(f"{label} → {resp.status_code}: {resp.text}", response=resp)
+    resp = _SESSION.request(method, f"{API_BASE_URL}{path}", json=json, timeout=_TIMEOUT)
+
+    if not resp.ok:
+        raise error(f"{method} {path} → {resp.status_code}: {resp.text}", response=resp)
+
+    return resp
 
 
 def claim_next_search_job() -> dict | None:
     """Claim the next pending Maps-discovery job, or None if the queue is empty."""
-    resp = requests.get(f"{API_BASE_URL}/api/scraper/jobs/next", headers=_HEADERS, timeout=30)
-    resp.raise_for_status()
-    return resp.json().get("data")
+    return _request("GET", "/api/scraper/jobs/next").json().get("data")
 
 
 def report_leads(search_id: str, leads: list[dict]) -> int:
     """Submit a batch of mapped leads for a search job. Returns the count created."""
-    resp = requests.post(
-        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/leads",
-        json={"leads": leads}, headers=_HEADERS, timeout=30,
-    )
-    if not resp.ok:
-        _raise_with_body(resp, f"POST /jobs/{search_id}/leads")
+    resp = _request("POST", f"/api/scraper/jobs/{search_id}/leads", json={"leads": leads})
+
     return resp.json()["data"]["created"]
 
 
 def complete_search_job(search_id: str, results_count: int) -> None:
     """Mark a search job as complete with the total accumulated lead count."""
-    resp = requests.post(
-        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/complete",
-        json={"results_count": results_count}, headers=_HEADERS, timeout=30,
-    )
-    resp.raise_for_status()
+    _request("POST", f"/api/scraper/jobs/{search_id}/complete", json={"results_count": results_count})
 
 
 def fail_search_job(search_id: str, error_message: str) -> None:
@@ -69,11 +72,10 @@ def fail_search_job(search_id: str, error_message: str) -> None:
     the search, so it is routinely longer — and a 422 here is the worst one to earn: the
     search stays claimed, which reads as a run still in progress rather than a failed one.
     """
-    resp = requests.post(
-        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/fail",
-        json={"error_message": error_message[:MAX_ERROR_MESSAGE]}, headers=_HEADERS, timeout=30,
+    _request(
+        "POST", f"/api/scraper/jobs/{search_id}/fail",
+        json={"error_message": error_message[:MAX_ERROR_MESSAGE]},
     )
-    resp.raise_for_status()
 
 
 def release_search_job(search_id: str) -> None:
@@ -82,10 +84,7 @@ def release_search_job(search_id: str) -> None:
     Idempotent on the API side: a search that has meanwhile been completed, failed, or
     recovered and re-claimed is left exactly as it is and still answers 200.
     """
-    resp = requests.post(
-        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/release", headers=_HEADERS, timeout=30,
-    )
-    resp.raise_for_status()
+    _request("POST", f"/api/scraper/jobs/{search_id}/release")
 
 
 def release_analysis_job(lead_id: str) -> None:
@@ -95,47 +94,31 @@ def release_analysis_job(lead_id: str) -> None:
     abandoned for a reason that has nothing to do with the lead — the worker being stopped,
     OpenRouter out of credit — must not cost it one.
     """
-    resp = requests.post(
-        f"{API_BASE_URL}/api/scraper/leads/{lead_id}/release", headers=_HEADERS, timeout=30,
-    )
-    resp.raise_for_status()
+    _request("POST", f"/api/scraper/leads/{lead_id}/release")
 
 
 def check_known_domains(domains: list[str]) -> list[str]:
     """Return the subset of the given URLs whose domains are already in the system."""
-    resp = requests.post(
-        f"{API_BASE_URL}/api/scraper/domains/check",
-        json={"domains": domains}, headers=_HEADERS, timeout=30,
-    )
-    resp.raise_for_status()
+    resp = _request("POST", "/api/scraper/domains/check", json={"domains": domains})
+
     return resp.json()["data"]["known"]
 
 
 def claim_next_analysis_job() -> dict | None:
     """Claim the next pending lead-analysis job, or None if the queue is empty."""
-    resp = requests.get(f"{API_BASE_URL}/api/scraper/leads/next", headers=_HEADERS, timeout=30)
-    resp.raise_for_status()
-    return resp.json().get("data")
+    return _request("GET", "/api/scraper/leads/next").json().get("data")
 
 
 def report_payment_error(search_id: str) -> None:
     """Flag the parent search as blocked by an OpenRouter payment error."""
-    resp = requests.post(
-        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/payment-error",
-        headers=_HEADERS, timeout=30,
-    )
-    resp.raise_for_status()
+    _request("POST", f"/api/scraper/jobs/{search_id}/payment-error")
 
 
 def report_analysis(lead_id: str, analysis: dict) -> None:
     """Submit the mapped analysis/outreach result for a single lead.
 
-    Raises ``ReportRejected`` on any refusal, with the body: this is the call whose failure
-    used to retire the lead, and it was the only one that did not say why.
+    Raises ``ReportRejected`` rather than a plain HTTPError: this is the call whose failure
+    used to retire the lead, and telling a refused payload from a lead that could not be
+    analysed is what stops it doing that again.
     """
-    resp = requests.patch(
-        f"{API_BASE_URL}/api/scraper/leads/{lead_id}/analysis",
-        json=analysis, headers=_HEADERS, timeout=30,
-    )
-    if not resp.ok:
-        _raise_with_body(resp, f"PATCH /leads/{lead_id}/analysis", ReportRejected)
+    _request("PATCH", f"/api/scraper/leads/{lead_id}/analysis", json=analysis, error=ReportRejected)

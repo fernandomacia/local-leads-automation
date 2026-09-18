@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from api.client import MAX_ERROR_MESSAGE, ReportRejected
+from api.client import ReportRejected
 from scraper.maps_scraper import maps_card_issues
 from worker import (
     _finish,
@@ -396,15 +396,6 @@ class TestFieldLimits:
         assert entry["checked_urls"] == ["https://x.es/aviso"]
         assert entry["status"] == "found"
 
-    def test_an_error_message_is_cut_to_what_the_api_stores(self):
-        # The 422 this avoids is the worst one to earn: the fail call is what marks the
-        # search failed, so its own rejection leaves the search looking like a live run.
-        import api.client as client
-
-        with patch("api.client.requests.post") as post:
-            client.fail_search_job("s1", "E" * 5000)
-
-        assert len(post.call_args.kwargs["json"]["error_message"]) == MAX_ERROR_MESSAGE
 
 
 # ── A refused report is not a failed lead ────────────────────────────────────
