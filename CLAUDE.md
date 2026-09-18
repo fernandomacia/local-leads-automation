@@ -149,6 +149,18 @@ def analyze_website(url: str) -> dict:
   costs `SCRAPER_CLAIM_TIMEOUT_MINUTES`. A genuine analysis failure is the opposite — it
   has used one of the lead's three attempts and must keep it. Note that `KeyboardInterrupt`
   is a `BaseException`: an `except Exception` will not see it.
+- **Trim to the API's limits at the boundary, in `_FIELD_LIMITS`.** One value over its
+  column is a 422 on the whole request, and neither endpoint forgives one: the ingest marks
+  the entire search failed, and a refused report used to retire the lead. Prose and URLs are
+  cut — a shorter address or pitch is degraded but usable — while an identifier is dropped,
+  because half a phone number or a truncated email is not a shorter answer, it is a wrong
+  one someone will dial or write to. The same applies to `error_message`: a 422 on the *fail*
+  call leaves the search looking like a live run.
+- **Releasing a claim refunds the attempt, so only release when the next try can succeed.**
+  A shutdown or a 402 will: the work is claimable again at once. A payload the API refused
+  will not — the re-claim gets refused identically and each round burns an LLM call, for
+  ever. There the claim is left standing (`ReportRejected`), and stale-claim recovery plus
+  the three-attempt ceiling bound it while the log names the refused fields.
 - **The version is the contract.** `APP_VERSION` is what the API's Compatibility table
   keys its worker requirements to, so a change to what this worker sends or reads bumps
   it in the same commit.

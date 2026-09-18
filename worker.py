@@ -17,6 +17,7 @@ from scraper.maps_scraper import scrape_incrementally, maps_card_issues
 from scraper.web_analyzer import analyze
 from ai.message_generator import generate
 from api.client import (
+    ReportRejected,
     claim_next_search_job,
     check_known_domains,
     report_leads,
@@ -51,6 +52,50 @@ def _finish(text: str) -> None:
     print((f"\r{text}" + " " * 10) if sys.stdout.isatty() else text)
 
 
+# What the API accepts per field, from IngestLeadsRequest and ReportLeadAnalysisRequest.
+# Anything over the limit is a 422 on the *whole* request, and neither endpoint forgives
+# one: on the ingest it fails the entire search, and a refused analysis report used to
+# retire the lead. Cutting here is not defensive — a Maps URL carrying tracking parameters
+# passes 255 routinely, and the pitch fields are written by an LLM.
+#
+# ``clip`` is the policy, and the two halves are not interchangeable. Prose and URLs are
+# cut: a shorter address or phone script is a degraded value the agent can still use. An
+# identifier is dropped instead, because half a phone number or a truncated email is not a
+# shorter answer, it is a wrong one that someone will dial or write to.
+_FIELD_LIMITS: dict[str, tuple[int, bool]] = {
+    # field:         (limit, clip)
+    "business_name": (255,  True),
+    "website":       (255,  True),
+    "maps_url":      (2000, True),
+    "phone":         (30,   False),
+    "address":       (255,  True),
+    "zip_code":      (10,   False),
+    "city":          (100,  True),
+    "province":      (100,  True),
+    "cms":           (50,   True),
+    "email":         (255,  False),
+    "email_subject": (255,  True),
+    "phone_script":  (5000, True),
+    "found_url":     (2048, False),
+    "method":        (20,   True),
+}
+
+
+def _fit(field: str, value):
+    """Return the value as the API will accept it, or None when it has to be left out."""
+    limit, clip = _FIELD_LIMITS[field]
+
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+
+    if not clip:
+        logger.warning("Dropping %s: %d characters, the API accepts %d", field, len(value), limit)
+        return None
+
+    logger.warning("Cutting %s to the %d characters the API accepts (was %d)", field, limit, len(value))
+    return value[:limit]
+
+
 def _release(release, job_id: str, what: str) -> None:
     """Hand a claimed job back to the queue, logging rather than raising if that fails.
 
@@ -76,7 +121,7 @@ def map_to_api_shape(lead: dict) -> dict:
     heterogeneous — different rows carrying different keys — which the API pads for
     itself before the bulk INSERT, and is the reason it has to.
     """
-    payload: dict = {"business_name": lead.get("lead", "")}
+    payload: dict = {"business_name": _fit("business_name", lead.get("lead", ""))}
     for api_key, lead_key in [
         ("website",  "website"),
         ("maps_url", "maps_url"),
@@ -87,7 +132,8 @@ def map_to_api_shape(lead: dict) -> dict:
         ("province", "province"),
     ]:
         if value := lead.get(lead_key):
-            payload[api_key] = value
+            if (value := _fit(api_key, value)) is not None:
+                payload[api_key] = value
 
     # Always sent, {} included: this is the only moment the Maps card is in front of us,
     # and the API accepts it here and nowhere else. {} says the card was complete; NULL
@@ -108,9 +154,9 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
     """
     payload = {}
     if analysis.get("cms"):
-        payload["cms"] = analysis["cms"]
-    if analysis.get("email"):
-        payload["email"] = analysis["email"]
+        payload["cms"] = _fit("cms", analysis["cms"])
+    if (email := _fit("email", analysis.get("email"))):
+        payload["email"] = email
 
     social = {f: analysis[f] for f in _SOCIAL_FIELDS if analysis.get(f)}
     if social:
@@ -125,7 +171,7 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
         # The evidence behind each finding (which URL was checked, in which language,
         # why a check did not apply). Rides along with the issues so the panel can
         # justify a finding when the business owner disputes it on the call.
-        payload["compliance_details"] = analysis.get("compliance_details", {})
+        payload["compliance_details"] = _fit_compliance_details(analysis.get("compliance_details", {}))
         # The language the site declares, which tells the agent what to call in. Sent
         # apart from the per-document entries: those hold the language whose lexicon
         # matched each link, and on a bilingual site the two differ.
@@ -137,13 +183,44 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
         payload["seo_issues"] = analysis["seo_issues"]
 
     if message.get("subject"):
-        payload["email_subject"] = message["subject"]
+        payload["email_subject"] = _fit("email_subject", message["subject"])
     if message.get("body"):
+        # No ceiling on the API side, so it goes as written.
         payload["email_body"] = message["body"]
     # Always send phone_script (even "") so NULL stays exclusive to "not yet analyzed"
-    payload["phone_script"] = message.get("phone_script", "")
+    payload["phone_script"] = _fit("phone_script", message.get("phone_script", ""))
 
     return payload
+
+
+def _fit_compliance_details(details: dict) -> dict:
+    """Trim the two fields of a compliance entry the API constrains, leaving the rest alone.
+
+    The entries themselves belong to the compliance module and reach the API unvalidated on
+    purpose — ``ReportLeadAnalysisRequest::validated()`` is overridden to preserve keys it
+    has no rule for, so the analyser can learn to report more without a release there. Only
+    the shape the API *does* enforce is fixed here, and ``found_url`` is dropped rather than
+    cut because a truncated URL is no longer the evidence it was recorded as.
+    """
+    if not isinstance(details, dict):
+        return details
+
+    fitted = {}
+    for document, entry in details.items():
+        if not isinstance(entry, dict):
+            fitted[document] = entry
+            continue
+
+        entry = dict(entry)
+        for field in ("found_url", "method"):
+            # Only a string over its limit is touched. `found_url: None` is evidence in its
+            # own right — we looked and there was nothing — and the key stays either way,
+            # because a URL dropped for being absurd means the same thing to the panel.
+            if isinstance(entry.get(field), str):
+                entry[field] = _fit(field, entry[field])
+        fitted[document] = entry
+
+    return fitted
 
 
 def _flush_batch(search_id: str, batch: list[dict], skip: set[str]) -> int:
@@ -213,6 +290,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
     """
     counter = f" {idx}" if idx else ""
     _progress(f"[>] Analyzing{counter}")
+    rendered = False
     try:
         # profession drives the legal-notice checks that only apply to regulated
         # professions (bar association and membership number, LSSI art. 10.1.c).
@@ -271,6 +349,20 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
         _finish("[!] Interrupted — releasing the lead")
         _release(release_analysis_job, job["id"], "lead")
         raise
+    except ReportRejected:
+        # Our payload is wrong; the lead is not. This used to answer {"failed": True},
+        # which writes analysis_failed_at and retires a lead that was read perfectly well
+        # — and nothing afterwards can tell that from a site that genuinely could not be.
+        #
+        # The claim is left standing on purpose. Releasing it would refund the attempt and
+        # the re-claim would be refused identically, burning an LLM call per round for
+        # ever; left alone, stale-claim recovery retries it and the three-attempt ceiling
+        # retires it, with the refused fields in the log each time.
+        logger.exception(
+            "The API refused the analysis report for lead %s (%s); leaving the claim to expire",
+            job["id"], job["business_name"],
+        )
+        return rendered
     except requests.HTTPError as e:
         # 402 comes from OpenRouter, never from this API: the credit ran out mid-pitch.
         # Nothing is wrong with the lead, so it goes back to the queue with its attempt

@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
+from api.client import MAX_ERROR_MESSAGE, ReportRejected
 from scraper.maps_scraper import maps_card_issues
 from worker import (
     _finish,
@@ -337,3 +338,102 @@ class TestReleaseOnInterrupt:
 
         release.assert_not_called()
         report.assert_called_once_with("1", {"failed": True})
+
+
+# ── Fitting a payload the API will accept ─────────────────────────────────────
+
+class TestFieldLimits:
+    """A value over its column is a 422 on the whole request, and neither endpoint
+    forgives one: the ingest fails the entire search, a refused report abandons the lead."""
+
+    def test_a_long_maps_url_is_cut_not_dropped(self):
+        # The common case by far: a Maps URL carrying tracking parameters.
+        result = map_to_api_shape({"lead": "X", "maps_url": "https://maps.google.com/?q=" + "a" * 3000})
+        assert len(result["maps_url"]) == 2000
+        assert result["maps_url"].startswith("https://maps.google.com/?q=")
+
+    def test_a_long_website_keeps_its_host(self):
+        # The host is the deduplication key on the API side, and the overflow is always in
+        # the query string, so cutting keeps the part that identifies the site.
+        result = map_to_api_shape({"lead": "X", "website": "https://ejemplo.es/?ref=" + "b" * 400})
+        assert len(result["website"]) == 255
+        assert result["website"].startswith("https://ejemplo.es/")
+
+    def test_an_absurd_phone_is_dropped_not_truncated(self):
+        # Half a phone number is not a shorter answer, it is a wrong one someone will dial.
+        result = map_to_api_shape({"lead": "X", "phone": "9" * 60})
+        assert "phone" not in result
+
+    def test_an_absurd_zip_code_is_dropped(self):
+        assert "zip_code" not in map_to_api_shape({"lead": "X", "zip_code": "0" * 40})
+
+    def test_a_long_business_name_is_cut(self):
+        assert len(map_to_api_shape({"lead": "N" * 400})["business_name"]) == 255
+
+    def test_a_long_pitch_is_cut(self):
+        # Written by an LLM, so this is the normal case rather than an anomaly.
+        message = {"subject": "S" * 400, "body": "B" * 9000, "phone_script": "P" * 6000}
+        result = map_analysis_to_api_shape({}, message)
+        assert len(result["email_subject"]) == 255
+        assert len(result["phone_script"]) == 5000
+        # email_body has no ceiling on the API side, so it goes as written.
+        assert len(result["email_body"]) == 9000
+
+    def test_an_absurd_email_is_dropped(self):
+        assert "email" not in map_analysis_to_api_shape({"email": "a" * 300 + "@x.es"}, {})
+
+    def test_an_absurd_found_url_becomes_null_and_the_entry_survives(self):
+        details = {"legal_notice": {"status": "found", "found_url": "https://x.es/" + "u" * 3000,
+                                   "checked_urls": ["https://x.es/aviso"]}}
+        entry = map_analysis_to_api_shape(
+            {"seo_score": 70, "compliance_details": details}, {},
+        )["compliance_details"]["legal_notice"]
+
+        assert entry["found_url"] is None
+        # The keys the API has no rule for are preserved — its validated() override exists
+        # precisely so the analyser can report more without a release there.
+        assert entry["checked_urls"] == ["https://x.es/aviso"]
+        assert entry["status"] == "found"
+
+    def test_an_error_message_is_cut_to_what_the_api_stores(self):
+        # The 422 this avoids is the worst one to earn: the fail call is what marks the
+        # search failed, so its own rejection leaves the search looking like a live run.
+        import api.client as client
+
+        with patch("api.client.requests.post") as post:
+            client.fail_search_job("s1", "E" * 5000)
+
+        assert len(post.call_args.kwargs["json"]["error_message"]) == MAX_ERROR_MESSAGE
+
+
+# ── A refused report is not a failed lead ────────────────────────────────────
+
+class TestReportRejected:
+    def test_a_refused_report_leaves_the_lead_alone(self):
+        # Answering {"failed": True} writes analysis_failed_at and retires a lead that was
+        # read perfectly well — and nothing afterwards can tell that apart from a site that
+        # genuinely could not be read.
+        response = requests.Response()
+        response.status_code = 422
+
+        with patch("worker.analyze", return_value={"cms": "wordpress", "seo_score": 60}), \
+             patch("worker.generate", return_value={"subject": "s", "body": "b"}), \
+             patch("worker.report_analysis", side_effect=ReportRejected(response=response)) as report, \
+             patch("worker.release_analysis_job") as release:
+            assert run_analysis_job(dict(_JOB)) is False
+
+        # Reported once — the rejected payload — and never again with failed: True.
+        report.assert_called_once()
+        # And not released: the refund would have the re-claim refused identically, burning
+        # an LLM call per round for ever. Stale-claim recovery and the attempt ceiling bound it.
+        release.assert_not_called()
+
+    def test_a_refused_report_still_counts_the_browser_it_used(self):
+        response = requests.Response()
+        response.status_code = 422
+
+        with patch("worker.analyze", return_value={"cms": "wordpress", "seo_score": 60,
+                                                  "compliance_rendered": True}), \
+             patch("worker.generate", return_value={"subject": "s", "body": "b"}), \
+             patch("worker.report_analysis", side_effect=ReportRejected(response=response)):
+            assert run_analysis_job(dict(_JOB)) is True
