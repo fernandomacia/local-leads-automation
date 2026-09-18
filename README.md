@@ -9,14 +9,20 @@ Lead generation tool for web developers. Extracts local businesses from Google M
 ## Pipeline
 
 ```
-SegurSEO-API (Angular → Laravel)
-  → scrape businesses from Google Maps (name, phone, address, city, province)
-  → analyze website (CMS, email, social networks, SEO score)
-  → filter contactable leads (email or any social network)
-  → generate personalized outreach email (OpenRouter LLM)
-  → report results back to the API
-  → assisted manual outreach
+SegurSEO Platform (Angular) → SegurSEO-API (Laravel) queues the work
+  → claim a search and scrape Google Maps (name, website, phone, address, city, province)
+  → report each batch, with what the Maps card was missing
+  → claim a lead and analyse its site (CMS, email, socials, SEO score, legal compliance)
+  → generate the outreach email and the phone script (OpenRouter LLM)
+  → report the analysis back
+  → assisted manual outreach, from the panel
 ```
+
+**Which leads are worth analysing is the API's decision, not this worker's.** It analyses
+whatever `GET /leads/next` hands it. A lead with no website and no way to reach it is
+failed at ingest on the API side, where "a way to reach it" means a phone number or an
+email — a social profile is not one. This README used to describe the filter as the
+worker's and as "email or any social network", and it was neither.
 
 ---
 
@@ -208,6 +214,12 @@ Derived from the Maps listing itself, not from fetching the website, so they are
 known even when the site is unreachable. An empty `{}` means the listing is
 complete — unlike NULL, which means the worker never processed the lead.
 
+**Reported with the ingest batch, never with the analysis.** The card is only in front of
+the scraper once, and an agent may add a website through the panel before the analysis
+runs — at which point "no website on the listing" is no longer derivable from anything the
+analysis can see. The API accepts the field on the ingest endpoint alone and drops it on the
+other.
+
 | Issue | Description |
 |---|---|
 | `no_website` | The Maps listing has no website |
@@ -244,15 +256,20 @@ config.py                    # Scraper, OpenRouter, sender, and API worker confi
 
 ---
 
-## Development Phases
+## Compatibility
 
-- [x] **Phase 0** — Basic prototype: extracts name and website from Google Maps
-- [x] **Phase 1** — Robust Maps scraper: unlimited scroll, address/phone/location, rate limiting with jitter, exponential backoff
-- [x] **Phase 2** — Web analyzer: CMS detection, email extraction, social networks, SEO scoring (14 checks)
-- [x] **Phase 3** — Message generation: OpenRouter LLM (DeepSeek), contactable lead filtering, full pipeline
-- [x] **Phase 4** — CLI flags, Streamlit dashboard, API client, JSON output, full refactor
-- [x] **Phase 5** — SegurSEO-API job-queue integration: `worker.py` daemon, `scrape_incrementally()`, domain deduplication
-- [x] **Phase 6** — Removed local pipeline (`main.py`, `app.py`, Streamlit/pandas) — driven exclusively by the API
+This worker is one of four components around the API, which is where the compatible
+combinations are recorded — the Compatibility table in `SegurSEO-API/README.md`, keyed to
+`APP_VERSION`. Two things it says that matter here:
+
+- **Deploy the API first.** Every version of this worker has needed an API at least as new
+  as itself, and each of those API releases accepted the older input as well, so the gap is
+  short and one-sided in that direction only.
+- **`APP_VERSION` is the contract**, not a label: it is what that table keys its
+  requirements to, so a change to what this worker sends or reads bumps it.
+
+Version history lives in the git tags (`v<APP_VERSION>`) and, in more detail than belongs
+here, in the project phases in `CLAUDE.md`.
 
 ---
 
@@ -261,4 +278,5 @@ config.py                    # Scraper, OpenRouter, sender, and API worker confi
 - Delays are set to 3–6 seconds between scraping actions to simulate human behavior.
 - Message sending is **semi-manual** — AI-generated drafts are reviewed before sending, in compliance with GDPR.
 - Message generation calls the OpenRouter API (`OPENROUTER_API_KEY` required in `.env`).
-- Leads without any reachable contact channel (email or social network) are skipped in message generation.
+- Leads with no website and no phone or email never reach this worker: the API fails them
+  at ingest, so no LLM call is spent on a pitch that could not be delivered.
