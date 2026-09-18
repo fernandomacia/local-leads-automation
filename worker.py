@@ -223,24 +223,53 @@ def _fit_compliance_details(details: dict) -> dict:
     return fitted
 
 
-def _flush_batch(search_id: str, batch: list[dict], skip: set[str]) -> int:
-    """Submit a batch of leads, updating the skip set with newly found known domains.
+def _known_domain_check():
+    """Return the predicate the scraper asks about each business it extracts.
 
-    What the skip set buys is one thing only: a known business stops consuming a slot of
-    ``max_results``. It does **not** save the detail tab — the scraper has to open the card
-    to learn the website in the first place, which is the only thing the domain can be
-    derived from — and it does not affect correctness either way, since the API deduplicates
-    by domain at ingest.
+    Asked per business, not per batch. The batched version answered after a lote of leads
+    had already been reported, so the first BATCH_SIZE businesses of every search went
+    unchecked — and with ``max_results`` at or below that, which is exactly what a quick
+    sample sets, the answer arrived after the cap had been spent on businesses the system
+    had all along. A sample of ten in a town already worked could return nothing new.
 
-    Note the cadence this implies: the set grows once per batch, so the first BATCH_SIZE
-    leads of a search are never checked before they are yielded. With ``max_results`` at or
-    below that, the skip set never gets consulted at all.
+    A positive answer is cached, because a domain the system knows does not stop being
+    known. A negative one is not, deliberately: once a lead is reported the API knows its
+    domain, so a second card for the same business — a branch sharing one website — is
+    skipped on the next question rather than ingested twice.
+
+    A failed check answers "not known". The consequence of being wrong that way is a lead
+    the API deduplicates at ingest anyway; the consequence of raising here would be losing
+    the search over a check that is only an optimisation.
     """
+    known: set[str] = set()
+
+    def is_known(domain: str) -> bool:
+        if not domain:
+            return False
+
+        if domain in known:
+            return True
+
+        try:
+            if check_known_domains([domain]):
+                known.add(domain)
+                return True
+        except Exception:
+            logger.warning(
+                "Could not check whether %s is already in the system; treating it as new",
+                domain, exc_info=True,
+            )
+
+        return False
+
+    return is_known
+
+
+def _flush_batch(search_id: str, batch: list[dict]) -> int:
+    """Submit a batch of leads. Returns the count actually inserted after server-side dedup."""
     if not batch:
         return 0
-    domains = [b["website"] for b in batch if b.get("website")]
-    if domains:
-        skip.update(check_known_domains(domains))
+
     return report_leads(search_id, batch)
 
 
@@ -251,22 +280,21 @@ def run_search_job(job: dict) -> int:
         Total number of new leads actually inserted (after server-side dedup).
     """
     print(f"[>] Search: {job['profession']} en {job['city']}")
-    # skip starts empty and is populated from check_known_domains responses so later leads
-    # on a known domain do not consume a slot of max_results. The set is passed by reference
-    # so scrape_incrementally sees every update made inside _flush_batch. It does not save
-    # the detail tab, which has to be opened to learn the website at all — see _flush_batch.
-    skip: set[str] = set()
+    # Asked about every business the scraper extracts, so a known one never consumes a slot
+    # of max_results — see _known_domain_check. It does not save the detail tab, which has
+    # to be opened to learn the website the domain comes from.
     batch: list[dict] = []
     total = 0
     try:
         for lead in scrape_incrementally(
-            job["profession"], job["city"], headless=HEADLESS, skip=skip, max_results=job["max_results"]
+            job["profession"], job["city"], headless=HEADLESS,
+            is_known=_known_domain_check(), max_results=job["max_results"],
         ):
             batch.append(map_to_api_shape(lead))
             if len(batch) >= BATCH_SIZE:
-                total += _flush_batch(job["id"], batch, skip)
+                total += _flush_batch(job["id"], batch)
                 batch = []
-        total += _flush_batch(job["id"], batch, skip)
+        total += _flush_batch(job["id"], batch)
         complete_search_job(job["id"], total)
         print(f"[+] Search done: {total} leads")
     except KeyboardInterrupt:

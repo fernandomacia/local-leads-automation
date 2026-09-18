@@ -1,6 +1,6 @@
 """Tests for scraper/maps_scraper.py — pure logic, no real browser."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,6 +11,7 @@ from scraper.maps_scraper import (
     SELECTOR_WEBSITE,
     _extract_business,
     _normalize_domain,
+    scrape_incrementally,
 )
 
 
@@ -155,3 +156,52 @@ class TestExtractBusiness:
         page = _make_page(name="Abogados Garcia & Asociados")
         result = _extract_business(page, "Elche")
         assert result["lead"] == "Abogados Garcia & Asociados"
+
+
+# ── A quick sample must not be spent on businesses we already have ────────────
+
+def _run_incrementally(leads, is_known, max_results):
+    """Drive scrape_incrementally over a fixed set of cards, with no real browser."""
+    with patch("scraper.maps_scraper.sync_playwright"), \
+         patch("scraper.maps_scraper._start_search",
+               return_value=(MagicMock(), MagicMock(), MagicMock())), \
+         patch("scraper.maps_scraper._visible_listing_hrefs",
+               return_value=[f"/h{i}" for i in range(len(leads))]), \
+         patch("scraper.maps_scraper._extract_with_retries", side_effect=leads), \
+         patch("scraper.maps_scraper._scroll_feed"):
+        return list(scrape_incrementally("fontaneros", "Elche", max_results=max_results,
+                                         is_known=is_known))
+
+
+class TestKnownBusinessesDoNotConsumeTheCap:
+    def test_a_sample_of_one_skips_the_businesses_already_in_the_system(self):
+        # The bug this replaces: the answer used to arrive once a batch had been reported,
+        # so with max_results at or below BATCH_SIZE the cap was spent before the first
+        # answer came back — a sample of ten in a worked town could return nothing new.
+        cards = [
+            {"lead": "Ya trabajado",  "website": "https://conocido.es"},
+            {"lead": "Ya trabajado2", "website": "https://tambien.es"},
+            {"lead": "Nuevo",         "website": "https://nuevo.es"},
+        ]
+
+        yielded = _run_incrementally(
+            cards, is_known=lambda d: d in {"conocido.es", "tambien.es"}, max_results=1,
+        )
+
+        assert [lead["lead"] for lead in yielded] == ["Nuevo"]
+
+    def test_without_the_question_every_card_counts(self):
+        # The default, for any caller that has nothing to ask.
+        cards = [{"lead": "Uno", "website": "https://uno.es"},
+                 {"lead": "Dos", "website": "https://dos.es"}]
+
+        assert len(_run_incrementally(cards, is_known=None, max_results=1)) == 1
+
+    def test_a_lead_with_no_website_is_never_skipped(self):
+        # There is no domain to ask about, and a business with no site is the best kind of
+        # lead this project has.
+        cards = [{"lead": "Sin web", "website": ""}]
+
+        assert [lead["lead"] for lead in _run_incrementally(
+            cards, is_known=lambda d: True, max_results=1,
+        )] == ["Sin web"]

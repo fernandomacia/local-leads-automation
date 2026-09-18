@@ -120,10 +120,16 @@ def analyze_website(url: str) -> dict:
   but shares one `browser.new_context()` with the results-list tab — separate
   contexts (e.g. `browser.new_page()`) don't share consent cookies, so every
   detail tab would hang on Google's consent screen and time out
-- The `skip` set saves a slot of `max_results`, not a detail tab: the card has to be
-  opened to learn the website, which is the only thing a domain can be derived from. And it
-  grows once per reported batch, so the first `BATCH_SIZE` leads are never checked before
-  being yielded — with `max_results` at or below that, it is never consulted at all
+- **"Is this business already ours?" is asked per card, not per batch.**
+  `scrape_incrementally()` takes an `is_known` predicate rather than a set of domains,
+  because a set can only hold what the caller already knew: the batched version answered
+  after a lote had been reported, so the first `BATCH_SIZE` businesses went unchecked and a
+  `max_results` sample — which is set at or below that by definition — could spend its whole
+  cap on businesses the system had all along. What it saves is a slot of `max_results`, never
+  the detail tab: the card has to be opened to learn the website a domain comes from
+- A positive answer is cached and a negative one is not, so a second card sharing one
+  website is skipped once the first has been reported. A failed check answers "not known":
+  the API deduplicates at ingest anyway, and losing a search over an optimisation would not
 - `MAX_IDLE_SCROLLS` bounds `scrape_incrementally()`: it stops after that many
   consecutive scroll waves with no new hrefs at all (end of feed), so an
   exhausted search doesn't scroll forever. Known (skipped) leads reset the

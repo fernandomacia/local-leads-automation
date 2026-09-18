@@ -241,7 +241,7 @@ def _to_ascii(host: str) -> str:
     underscore-and-accent host — while ``idna`` enforces IDNA2008 validity and refuses
     them. Where it refuses, this returns the name as written and the API's answer will not
     match it. The cost of a miss is one slot in ``max_results``, never a duplicate lead:
-    the skip set is an optimisation, and the API normalises what it is *sent* at ingest, so
+    the check is an optimisation, and the API normalises what it is *sent* at ingest, so
     deduplication there is unaffected. See ``TestNormalizeDomainAgreesWithTheApi``.
     """
     if not host or host.isascii():
@@ -323,7 +323,7 @@ def scrape_incrementally(
     city: str,
     headless: bool = False,
     max_results: int | None = None,
-    skip: set[str] | None = None,
+    is_known=None,
 ):
     """Yield business listings one at a time as they're discovered on Google Maps.
 
@@ -340,15 +340,20 @@ def scrape_incrementally(
         headless: Run the browser without a visible window.
         max_results: Stop once this many non-skipped leads have been yielded.
             ``None`` collects until the search is exhausted.
-        skip: Normalized website domains (see ``_normalize_domain``) to silently
-            skip — already known to the caller. Skipped leads don't count
-            toward ``max_results``, but they are still extracted: the card has
-            to be opened to learn the website the domain comes from.
+        is_known: Asked about each extracted lead's normalized domain (see
+            ``_normalize_domain``) and, when it answers True, the lead is
+            skipped silently and does not count toward ``max_results``.
+            Asked per business rather than handed a set up front, because a
+            set can only hold what the caller already knew: with
+            ``max_results`` small — the point of a quick sample — a batched
+            answer arrived after the cap had already been spent on businesses
+            the system had all along. The card is still opened either way; it
+            is the only place the website comes from.
 
     Yields:
         Lead dicts with the same shape as ``scrape()``'s results, one at a time.
     """
-    skip = skip or set()
+    is_known = is_known or (lambda domain: False)
 
     with sync_playwright() as p:
         browser, context, list_page = _start_search(p, profession, city, headless)
@@ -371,7 +376,7 @@ def scrape_incrementally(
                         continue
                     name = lead.get("lead", "")
                     domain = _normalize_domain(lead.get("website", ""))
-                    if lead["website"] and domain in skip:
+                    if lead["website"] and is_known(domain):
                         continue
                     if not lead["website"]:
                         if name in seen_names:

@@ -11,6 +11,7 @@ from api.client import MAX_ERROR_MESSAGE, ReportRejected
 from scraper.maps_scraper import maps_card_issues
 from worker import (
     _finish,
+    _known_domain_check,
     _progress,
     map_analysis_to_api_shape,
     map_to_api_shape,
@@ -437,3 +438,52 @@ class TestReportRejected:
              patch("worker.generate", return_value={"subject": "s", "body": "b"}), \
              patch("worker.report_analysis", side_effect=ReportRejected(response=response)):
             assert run_analysis_job(dict(_JOB)) is True
+
+
+# ── Asking whether a business is already in the system ────────────────────────
+
+class TestKnownDomainCheck:
+    """The question that decides whether a business consumes a slot of max_results.
+
+    It used to be asked once per reported batch, so the first BATCH_SIZE businesses of a
+    search went unchecked — and a quick sample sets max_results at or below that, so the
+    answer arrived after the cap had already been spent on businesses we had all along.
+    """
+
+    def test_asks_the_api_about_the_first_business(self):
+        with patch("worker.check_known_domains", return_value=["ejemplo.es"]) as check:
+            assert _known_domain_check()("ejemplo.es") is True
+
+        check.assert_called_once_with(["ejemplo.es"])
+
+    def test_a_known_domain_is_asked_about_once(self):
+        # Known does not become unknown, so the answer is worth keeping.
+        with patch("worker.check_known_domains", return_value=["ejemplo.es"]) as check:
+            is_known = _known_domain_check()
+            assert is_known("ejemplo.es") is True
+            assert is_known("ejemplo.es") is True
+
+        check.assert_called_once()
+
+    def test_an_unknown_domain_is_asked_about_again(self):
+        # Deliberately not cached: once the lead is reported the API knows its domain, so a
+        # second card for the same business — a branch sharing one website — is skipped on
+        # the next question instead of being ingested twice.
+        with patch("worker.check_known_domains", side_effect=[[], ["ejemplo.es"]]) as check:
+            is_known = _known_domain_check()
+            assert is_known("ejemplo.es") is False
+            assert is_known("ejemplo.es") is True
+
+        assert check.call_count == 2
+
+    def test_a_lead_with_no_website_is_never_asked_about(self):
+        with patch("worker.check_known_domains") as check:
+            assert _known_domain_check()("") is False
+
+        check.assert_not_called()
+
+    def test_a_failed_check_answers_not_known_instead_of_ending_the_search(self):
+        # Being wrong this way costs a lead the API deduplicates at ingest anyway. Raising
+        # would lose the whole search over a check that is only an optimisation.
+        with patch("worker.check_known_domains", side_effect=requests.ConnectionError("down")):
+            assert _known_domain_check()("ejemplo.es") is False
