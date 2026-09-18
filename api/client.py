@@ -52,6 +52,31 @@ def fail_search_job(search_id: str, error_message: str) -> None:
     resp.raise_for_status()
 
 
+def release_search_job(search_id: str) -> None:
+    """Hand a claimed search back to the queue so it is claimable again at once.
+
+    Idempotent on the API side: a search that has meanwhile been completed, failed, or
+    recovered and re-claimed is left exactly as it is and still answers 200.
+    """
+    resp = requests.post(
+        f"{API_BASE_URL}/api/scraper/jobs/{search_id}/release", headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def release_analysis_job(lead_id: str) -> None:
+    """Hand a claimed lead back to the analysis queue, refunding the attempt it spent.
+
+    A lead gets three attempts before the API gives up on it permanently, so a claim
+    abandoned for a reason that has nothing to do with the lead — the worker being stopped,
+    OpenRouter out of credit — must not cost it one.
+    """
+    resp = requests.post(
+        f"{API_BASE_URL}/api/scraper/leads/{lead_id}/release", headers=_HEADERS, timeout=30,
+    )
+    resp.raise_for_status()
+
+
 def check_known_domains(domains: list[str]) -> list[str]:
     """Return the subset of the given URLs whose domains are already in the system."""
     resp = requests.post(
