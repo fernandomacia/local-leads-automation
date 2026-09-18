@@ -9,6 +9,13 @@ import api.client as client
 from api.client import MAX_ERROR_MESSAGE, ReportRejected
 
 
+@pytest.fixture(autouse=True)
+def _no_backoff():
+    """Run the retry path without its waits — the cadence is not what these assert."""
+    with patch("api.client.time.sleep"):
+        yield
+
+
 def _response(status: int = 200, body: str = "", data=None) -> MagicMock:
     resp = MagicMock()
     resp.ok = 200 <= status < 400
@@ -72,3 +79,48 @@ class TestFailureMessage:
             client.fail_search_job("s1", "E" * 5000)
 
         assert len(request.call_args.kwargs["json"]["error_message"]) == MAX_ERROR_MESSAGE
+
+
+class TestRetries:
+    """A 5xx or a lost connection says nothing about the request, so the same call is tried
+    again — bounded, because a deterministic 500 has to end in a failure somebody sees."""
+
+    def test_a_transient_500_is_retried_and_succeeds(self):
+        with patch.object(client._SESSION, "request",
+                          side_effect=[_response(503, "maintenance"), _response(data={"id": "s1"})]) as request:
+            assert client.claim_next_search_job() == {"id": "s1"}
+
+        assert request.call_count == 2
+
+    def test_a_persistent_500_still_fails_after_the_retries(self):
+        # The bound is the point: releasing the search instead would have the API hand it
+        # out again — a 500 a particular lead triggers would bounce the job for ever and
+        # re-scrape Maps on every round.
+        with patch.object(client._SESSION, "request", return_value=_response(500, "boom")) as request:
+            with pytest.raises(requests.HTTPError):
+                client.report_leads("s1", [])
+
+        assert request.call_count == client._RETRIES + 1
+
+    def test_a_connection_blip_is_retried(self):
+        with patch.object(client._SESSION, "request",
+                          side_effect=[requests.ConnectionError("blip"), _response()]) as request:
+            client.complete_search_job("s1", 3)
+
+        assert request.call_count == 2
+
+    def test_a_connection_that_never_comes_back_raises(self):
+        # And the caller decides: run_search_job releases the search rather than failing it,
+        # because reaching the API is what it could not do.
+        with patch.object(client._SESSION, "request", side_effect=requests.ConnectionError("down")):
+            with pytest.raises(requests.ConnectionError):
+                client.complete_search_job("s1", 3)
+
+    def test_a_refusal_is_never_retried(self):
+        # A 422 is the API reading the payload and saying no. Sending it again wastes two
+        # round trips to be told the same thing.
+        with patch.object(client._SESSION, "request", return_value=_response(422, "{}")) as request:
+            with pytest.raises(ReportRejected):
+                client.report_analysis("l1", {})
+
+        request.assert_called_once()

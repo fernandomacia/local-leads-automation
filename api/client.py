@@ -4,11 +4,30 @@ Each function wraps one endpoint of the worker contract: claiming the next
 job, reporting results, and signaling completion or failure.
 """
 
+import logging
+import time
+
 import requests
 
 from config import API_BASE_URL, API_TOKEN
 
+logger = logging.getLogger(__name__)
+
 _TIMEOUT = 30
+
+# Retried because they say nothing about the request: the API is broken or briefly out of
+# reach, and the same call a moment later is the whole fix. Two extra attempts, backing off,
+# and then the failure is handed to the caller.
+#
+# It has to stay bounded, and that is the difference from how a lost connection is treated.
+# Losing the connection throttles itself — claiming a search needs the API too, so nothing
+# re-runs while it is down — but a 500 leaves the API perfectly able to hand the same search
+# out again. A deterministic one, a bug a particular lead triggers, would bounce that job for
+# ever and re-scrape Maps on every round. So it must still end in a failed search somebody
+# can see.
+_RETRY_STATUSES = frozenset({500, 502, 503, 504})
+_RETRIES = 2
+_RETRY_BACKOFF_SECONDS = 2
 
 # One connection, reused. The worker asks about every business it extracts — one request
 # per Maps card — so a fresh connection per question would be a TLS handshake per card.
@@ -39,8 +58,34 @@ def _request(method: str, path: str, *, json=None, error=requests.HTTPError) -> 
     somebody had had to diagnose. That is the wrong way round: the body is where the API
     names the field it refused, and ``raise_for_status()`` throws it away, so a 422 arrived
     as a status with nothing to act on. Every call carries it now.
+
+    **Every retry here is safe to repeat**, which is why they are retried at all:
+
+    - `report_leads` deduplicates by domain on the API side, so a batch sent twice because
+      the first answer was lost inserts each lead once.
+    - `complete`, `fail`, `release` and `payment-error` all set a state rather than
+      incrementing anything, and `report_analysis` writes the same fields again.
+    - `domains/check` only reads.
+    - A claim is the one exception worth naming: if the first request did claim a job and
+      the answer was lost, the retry claims a different one and the first sits until
+      stale-claim recovery re-queues it. That costs one window, and nothing can do better
+      without an idempotency key the contract does not have.
     """
-    resp = _SESSION.request(method, f"{API_BASE_URL}{path}", json=json, timeout=_TIMEOUT)
+    for attempt in range(_RETRIES + 1):
+        last = attempt == _RETRIES
+
+        try:
+            resp = _SESSION.request(method, f"{API_BASE_URL}{path}", json=json, timeout=_TIMEOUT)
+        except (requests.ConnectionError, requests.Timeout):
+            if last:
+                raise
+        else:
+            if resp.ok or resp.status_code not in _RETRY_STATUSES or last:
+                break
+
+            logger.warning("%s %s answered %s; retrying", method, path, resp.status_code)
+
+        time.sleep(_RETRY_BACKOFF_SECONDS * (attempt + 1))
 
     if not resp.ok:
         raise error(f"{method} {path} → {resp.status_code}: {resp.text}", response=resp)

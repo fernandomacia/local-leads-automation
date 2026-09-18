@@ -166,6 +166,14 @@ def analyze_website(url: str) -> dict:
   matches, a consent screen that changed, a payload the API refused. Those fail the search
   on purpose, because the message reaches the panel where somebody sees it, and a job that
   silently bounces hides a broken scraper behind a queue that never empties.
+- **A 5xx is retried in the client, and never released.** `_request()` tries a 500, 502, 503
+  or 504 twice more and then hands the failure up. The asymmetry with a lost connection is
+  deliberate: losing the connection throttles itself, because claiming a job needs the API
+  too, whereas a 500 leaves the API perfectly able to hand the same search out again — so a
+  deterministic one, the kind a particular lead triggers, would bounce that job for ever and
+  re-scrape Maps on every round. Bounded retries let a passing fault through and leave a
+  real one as a failed search somebody can see. Every call is safe to repeat; the reasoning
+  per endpoint is in that docstring, including the one exception, a lost claim.
 - **Trim to the API's limits at the boundary, in `_FIELD_LIMITS`.** One value over its
   column is a 422 on the whole request, and neither endpoint forgives one: the ingest marks
   the entire search failed, and a refused report used to retire the lead. Prose and URLs are
