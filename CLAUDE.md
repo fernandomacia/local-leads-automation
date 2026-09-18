@@ -120,6 +120,10 @@ def analyze_website(url: str) -> dict:
   but shares one `browser.new_context()` with the results-list tab — separate
   contexts (e.g. `browser.new_page()`) don't share consent cookies, so every
   detail tab would hang on Google's consent screen and time out
+- The `skip` set saves a slot of `max_results`, not a detail tab: the card has to be
+  opened to learn the website, which is the only thing a domain can be derived from. And it
+  grows once per reported batch, so the first `BATCH_SIZE` leads are never checked before
+  being yielded — with `max_results` at or below that, it is never consulted at all
 - `MAX_IDLE_SCROLLS` bounds `scrape_incrementally()`: it stops after that many
   consecutive scroll waves with no new hrefs at all (end of feed), so an
   exhausted search doesn't scroll forever. Known (skipped) leads reset the

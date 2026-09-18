@@ -3,6 +3,10 @@ playwright~=1.60
 requests~=2.34
 urllib3~=2.7
 beautifulsoup4~=4.15
+# Punycode, so _normalize_domain() agrees with the API's Domain value object on an
+# accented or ñ domain. Already present as a requests dependency; declared because this
+# project imports it directly.
+idna~=3.18
 
 # Configuration
 python-dotenv~=1.2

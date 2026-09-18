@@ -9,6 +9,8 @@ import random
 import re
 import time
 from urllib.parse import quote_plus, urlparse
+
+import idna
 from playwright.sync_api import (
     sync_playwright,
     Browser,
@@ -226,15 +228,63 @@ def _extract_with_retries(page: Page, href: str, default_city: str = "") -> dict
     return None
 
 
-def _normalize_domain(url: str) -> str:
-    """Normalize a URL to a bare lowercase hostname (no protocol, port, or www.).
+def _to_ascii(host: str) -> str:
+    """Punycode a hostname, or return it as written if it cannot be encoded.
 
-    Matches the normalization rule used by the API (``App\\Values\\Domain``) so
-    extracted websites can be compared against its ``known_domains`` lists.
+    Mirrors ``Domain::toAscii()``: falling back to the name as written rather than to an
+    empty string, which would compare equal to everything. An already-ASCII host is
+    returned untouched rather than round-tripped, because ``idna`` is stricter than the
+    profile the API uses and would reject hosts PHP accepts.
+
+    **The two are not identical in that fallback, and it is bounded on purpose.** PHP runs
+    ICU's UTS-46, which encodes anything it can parse — an emoji label, a mixed
+    underscore-and-accent host — while ``idna`` enforces IDNA2008 validity and refuses
+    them. Where it refuses, this returns the name as written and the API's answer will not
+    match it. The cost of a miss is one slot in ``max_results``, never a duplicate lead:
+    the skip set is an optimisation, and the API normalises what it is *sent* at ingest, so
+    deduplication there is unaffected. See ``TestNormalizeDomainAgreesWithTheApi``.
     """
+    if not host or host.isascii():
+        return host
+
+    try:
+        return idna.encode(host, uts46=True).decode("ascii")
+    except idna.IDNAError:
+        return host
+
+
+def _normalize_domain(url: str) -> str:
+    """Normalize a URL to the bare ASCII hostname the API stores.
+
+    A port-for-port translation of ``App\\Values\\Domain::from()``, and it has to stay
+    one: ``POST /domains/check`` answers with domains *it* normalised, and this is what
+    those answers are compared against. The two disagreed on six of the nine cases in
+    ``TestNormalizeDomain``, and every disagreement is a business re-ingested, re-analysed
+    at the owner's expense and rung again:
+
+    - **No punycode.** The API stores ``xn--peluquera-n5a.es``, this returned
+      ``peluquería.es``, so no accented domain ever matched — and Spanish domains with an
+      ñ or an accent are not an edge case in this market.
+    - **``netloc`` is not a hostname.** It carries the port *and* any userinfo, so
+      ``https://user:pass@ejemplo.es/x`` normalised to ``user``. ``.hostname`` is the field
+      that means what this function means.
+    - **A URL with no scheme produced the empty string**, because ``urlparse`` needs one to
+      see a host at all — so a bare ``ejemplo.es`` from a Maps card matched nothing.
+    - **A trailing dot survived**, and ``ejemplo.es.`` is the same site as ``ejemplo.es``.
+    """
+    url = url.strip()
+
     if not url:
         return ""
-    return urlparse(url).netloc.lower().split(":")[0].removeprefix("www.")
+
+    try:
+        # The "//" prefix is what lets a scheme-less "www.ejemplo.es/tienda" parse, and is
+        # the same fallback the API applies for the same reason.
+        host = urlparse(url).hostname or urlparse(f"//{url}").hostname or url
+    except ValueError:
+        host = url
+
+    return _to_ascii(host.rstrip(".").lower().removeprefix("www."))
 
 
 def scrape(profession: str, city: str, headless: bool = False, max_results: int | None = None) -> list[dict]:
@@ -292,7 +342,8 @@ def scrape_incrementally(
             ``None`` collects until the search is exhausted.
         skip: Normalized website domains (see ``_normalize_domain``) to silently
             skip — already known to the caller. Skipped leads don't count
-            toward ``max_results``.
+            toward ``max_results``, but they are still extracted: the card has
+            to be opened to learn the website the domain comes from.
 
     Yields:
         Lead dicts with the same shape as ``scrape()``'s results, one at a time.

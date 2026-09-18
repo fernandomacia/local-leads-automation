@@ -226,9 +226,15 @@ def _fit_compliance_details(details: dict) -> dict:
 def _flush_batch(search_id: str, batch: list[dict], skip: set[str]) -> int:
     """Submit a batch of leads, updating the skip set with newly found known domains.
 
-    Calls check_known_domains so future scraper pages avoid opening detail tabs for
-    domains already in the system. Returns the count of leads actually inserted
-    (server-side deduplication handles the final filter).
+    What the skip set buys is one thing only: a known business stops consuming a slot of
+    ``max_results``. It does **not** save the detail tab — the scraper has to open the card
+    to learn the website in the first place, which is the only thing the domain can be
+    derived from — and it does not affect correctness either way, since the API deduplicates
+    by domain at ingest.
+
+    Note the cadence this implies: the set grows once per batch, so the first BATCH_SIZE
+    leads of a search are never checked before they are yielded. With ``max_results`` at or
+    below that, the skip set never gets consulted at all.
     """
     if not batch:
         return 0
@@ -245,10 +251,10 @@ def run_search_job(job: dict) -> int:
         Total number of new leads actually inserted (after server-side dedup).
     """
     print(f"[>] Search: {job['profession']} en {job['city']}")
-    # skip starts empty and is populated from check_known_domains responses so
-    # subsequent Maps pages silently bypass already-known domains without opening
-    # a detail tab for each. The set is passed by reference so scrape_incrementally
-    # sees every update made inside _flush_batch.
+    # skip starts empty and is populated from check_known_domains responses so later leads
+    # on a known domain do not consume a slot of max_results. The set is passed by reference
+    # so scrape_incrementally sees every update made inside _flush_batch. It does not save
+    # the detail tab, which has to be opened to learn the website at all — see _flush_batch.
     skip: set[str] = set()
     batch: list[dict] = []
     total = 0
