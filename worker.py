@@ -22,6 +22,8 @@ from api.client import (
     report_leads,
     complete_search_job,
     fail_search_job,
+    release_search_job,
+    release_analysis_job,
     claim_next_analysis_job,
     report_payment_error,
     report_analysis,
@@ -47,6 +49,22 @@ def _progress(text: str) -> None:
 def _finish(text: str) -> None:
     """Print a final line, clearing the in-place counter it replaces on a terminal."""
     print((f"\r{text}" + " " * 10) if sys.stdout.isatty() else text)
+
+
+def _release(release, job_id: str, what: str) -> None:
+    """Hand a claimed job back to the queue, logging rather than raising if that fails.
+
+    Every caller is already handling something else — an interruption the operator asked
+    for, or an upstream failure — and a release that cannot get through must not replace
+    it with a traceback. The API's stale-claim recovery is the backstop: it costs up to
+    SCRAPER_CLAIM_TIMEOUT_MINUTES, which is exactly the wait this call exists to avoid.
+    """
+    try:
+        release(job_id)
+    except Exception:
+        logger.warning(
+            "Could not release the %s in hand; leaving it to stale-claim recovery", what, exc_info=True,
+        )
 
 
 def map_to_api_shape(lead: dict) -> dict:
@@ -168,6 +186,14 @@ def run_search_job(job: dict) -> int:
         total += _flush_batch(job["id"], batch, skip)
         complete_search_job(job["id"], total)
         print(f"[+] Search done: {total} leads")
+    except KeyboardInterrupt:
+        # KeyboardInterrupt is a BaseException, so it never reached the handler below and
+        # the search stayed `scraping` until the API's stale-claim recovery noticed —
+        # half an hour in which the operator who stopped the worker could not restart it
+        # on the same search. Released and re-raised: stopping is what was asked for.
+        _finish("[!] Interrupted — releasing the search")
+        _release(release_search_job, job["id"], "search")
+        raise
     except Exception as e:
         logger.exception("Search job %s failed", job["id"])
         try:
@@ -241,7 +267,15 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
         message = generate({**base_context, "has_website": bool(analysis.get("website"))})
         report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
         return rendered
+    except KeyboardInterrupt:
+        _finish("[!] Interrupted — releasing the lead")
+        _release(release_analysis_job, job["id"], "lead")
+        raise
     except requests.HTTPError as e:
+        # 402 comes from OpenRouter, never from this API: the credit ran out mid-pitch.
+        # Nothing is wrong with the lead, so it goes back to the queue with its attempt
+        # refunded — otherwise a funding lapse spends all three and the API gives up on
+        # leads it never actually failed to analyse.
         if e.response is not None and e.response.status_code == 402:
             search_id = job.get("lead_search_id")
             if search_id:
@@ -249,6 +283,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
                     report_payment_error(search_id)
                 except Exception:
                     pass
+            _release(release_analysis_job, job["id"], "lead")
             raise
         logger.exception("Analysis job %s (%s) failed with HTTP error", job["id"], job["business_name"])
         try:
@@ -305,6 +340,10 @@ def main() -> None:
             if was_analyzing:
                 _finish(_done_line())
                 was_analyzing = False
+        except KeyboardInterrupt:
+            # The job in hand, if any, has already released itself on the way out.
+            _finish("[+] Worker stopped")
+            return
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 402:
                 time.sleep(120)

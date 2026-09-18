@@ -63,6 +63,13 @@ Requires `API_BASE_URL` and `API_TOKEN` in `.env`. Jobs are created via the
 Angular frontend — results are reported straight to the API via
 `report_leads()` / `report_analysis()`.
 
+**Ctrl+C hands the job in hand back to the queue** (`release_search_job` /
+`release_analysis_job`), so the search is claimable again immediately and the lead keeps
+the attempt its claim charged. Without that the API only clears the claim through
+`scraper:recover-stale-jobs`, up to `SCRAPER_CLAIM_TIMEOUT_MINUTES` later — so stopping
+the worker to change something meant waiting half an hour to run the same search again.
+Requires API ≥ 3.1.0.
+
 ---
 
 ## Output fields

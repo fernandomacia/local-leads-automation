@@ -5,6 +5,7 @@ import sys
 from unittest.mock import patch
 
 import pytest
+import requests
 
 from scraper.maps_scraper import maps_card_issues
 from worker import (
@@ -13,6 +14,7 @@ from worker import (
     map_analysis_to_api_shape,
     map_to_api_shape,
     run_analysis_job,
+    run_search_job,
 )
 
 
@@ -273,3 +275,65 @@ class TestRenderAccounting:
         with patch("worker.analyze", side_effect=RuntimeError("boom")), \
              patch("worker.report_analysis"):
             assert run_analysis_job(dict(_JOB)) is False
+
+
+# ── Handing a claimed job back ────────────────────────────────────────────────
+
+class TestReleaseOnInterrupt:
+    """A claim abandoned for a reason that is not the job's fault must not cost it.
+
+    Without these, Ctrl+C left the search `scraping` and the lead claimed with one of its
+    three attempts spent, and only the API's stale-claim recovery cleared them — half an
+    hour later, which is exactly the wait the release endpoints exist to avoid.
+    """
+
+    def test_ctrl_c_during_a_search_releases_it(self):
+        with patch("worker.scrape_incrementally", side_effect=KeyboardInterrupt), \
+             patch("worker.release_search_job") as release:
+            with pytest.raises(KeyboardInterrupt):
+                run_search_job({"id": "s1", "profession": "fontaneros", "city": "Elche",
+                                "max_results": None})
+
+        release.assert_called_once_with("s1")
+
+    def test_ctrl_c_during_an_analysis_releases_the_lead(self):
+        with patch("worker.analyze", side_effect=KeyboardInterrupt), \
+             patch("worker.release_analysis_job") as release:
+            with pytest.raises(KeyboardInterrupt):
+                run_analysis_job(dict(_JOB))
+
+        release.assert_called_once_with("1")
+
+    def test_the_interruption_survives_a_release_that_fails(self):
+        # Stopping is what the operator asked for; a release that cannot get through is a
+        # warning and a wait for stale-claim recovery, never a traceback in its place.
+        with patch("worker.analyze", side_effect=KeyboardInterrupt), \
+             patch("worker.release_analysis_job", side_effect=RuntimeError("API down")):
+            with pytest.raises(KeyboardInterrupt):
+                run_analysis_job(dict(_JOB))
+
+    def test_a_402_releases_the_lead_and_warns_the_search(self):
+        # OpenRouter out of credit says nothing about the lead. Keeping the claim would
+        # spend all three attempts on a funding lapse and have the API give up for good.
+        response = requests.Response()
+        response.status_code = 402
+
+        with patch("worker.analyze", side_effect=requests.HTTPError(response=response)), \
+             patch("worker.report_payment_error") as payment_error, \
+             patch("worker.release_analysis_job") as release:
+            with pytest.raises(requests.HTTPError):
+                run_analysis_job({**_JOB, "lead_search_id": "s1"})
+
+        payment_error.assert_called_once_with("s1")
+        release.assert_called_once_with("1")
+
+    def test_an_ordinary_failure_still_fails_the_lead_instead_of_releasing_it(self):
+        # The distinction the release is for: a lead whose site cannot be analysed has
+        # genuinely used an attempt, and three of those are meant to retire it.
+        with patch("worker.analyze", side_effect=RuntimeError("boom")), \
+             patch("worker.release_analysis_job") as release, \
+             patch("worker.report_analysis") as report:
+            assert run_analysis_job(dict(_JOB)) is False
+
+        release.assert_not_called()
+        report.assert_called_once_with("1", {"failed": True})

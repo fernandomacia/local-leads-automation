@@ -142,6 +142,13 @@ def analyze_website(url: str) -> dict:
   complete, the site was audited and clean. `None` means no worker has reported yet. Never
   omit a key to mean "nothing found", and never send `{}` for something that was not
   checked.
+- **A claim abandoned for a reason that is not the job's fault is released, never left to
+  recovery.** Ctrl+C and an OpenRouter 402 both say nothing about the lead, so they call
+  `release_analysis_job` / `release_search_job` and the work is claimable again at once;
+  the API's `scraper:recover-stale-jobs` is the backstop for a worker that *died*, and it
+  costs `SCRAPER_CLAIM_TIMEOUT_MINUTES`. A genuine analysis failure is the opposite — it
+  has used one of the lead's three attempts and must keep it. Note that `KeyboardInterrupt`
+  is a `BaseException`: an `except Exception` will not see it.
 - **The version is the contract.** `APP_VERSION` is what the API's Compatibility table
   keys its worker requirements to, so a change to what this worker sends or reads bumps
   it in the same commit.
