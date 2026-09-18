@@ -159,6 +159,13 @@ def analyze_website(url: str) -> dict:
   costs `SCRAPER_CLAIM_TIMEOUT_MINUTES`. A genuine analysis failure is the opposite — it
   has used one of the lead's three attempts and must keep it. Note that `KeyboardInterrupt`
   is a `BaseException`: an `except Exception` will not see it.
+- **The same line divides a search that failed from one that was interrupted.** Losing the
+  API mid-scrape — `ConnectionError`, `Timeout` — says nothing about the search, and
+  recording a failure would mean calling the API that just could not be reached, so the
+  search is released. Everything else is the scrape itself: a selector that no longer
+  matches, a consent screen that changed, a payload the API refused. Those fail the search
+  on purpose, because the message reaches the panel where somebody sees it, and a job that
+  silently bounces hides a broken scraper behind a queue that never empties.
 - **Trim to the API's limits at the boundary, in `_FIELD_LIMITS`.** One value over its
   column is a 422 on the whole request, and neither endpoint forgives one: the ingest marks
   the entire search failed, and a refused report used to retire the lead. Prose and URLs are

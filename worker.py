@@ -277,7 +277,10 @@ def run_search_job(job: dict) -> int:
     """Discover businesses for a search job, reporting new leads in batches.
 
     Returns:
-        Total number of new leads actually inserted (after server-side dedup).
+        Total number of new leads actually inserted (after server-side dedup) — including
+        after a failure, and deliberately: the leads reported before it are already in the
+        system and the API queues them for analysis regardless of the search's own status,
+        so the figure is what the caller uses it for, an expectation of the analyses to come.
     """
     print(f"[>] Search: {job['profession']} en {job['city']}")
     # Asked about every business the scraper extracts, so a known one never consumes a slot
@@ -305,7 +308,23 @@ def run_search_job(job: dict) -> int:
         _finish("[!] Interrupted — releasing the search")
         _release(release_search_job, job["id"], "search")
         raise
+    except (requests.ConnectionError, requests.Timeout):
+        # The API went out of reach, which says nothing about the search. Marking it failed
+        # would retire a perfectly good job over a network blip — and doing so means calling
+        # the same API that just could not be reached. Released instead, best effort: if that
+        # does not get through either, stale-claim recovery re-queues it.
+        #
+        # There is no attempt ceiling on a search, so a fault that looks transient and is
+        # not would bounce the job for ever. It is throttled by its own cause: claiming a
+        # search needs the API too, so while it is unreachable nothing re-runs, and each
+        # round leaves a warning behind.
+        logger.warning("Lost the API during search %s; releasing it", job["id"], exc_info=True)
+        _release(release_search_job, job["id"], "search")
     except Exception as e:
+        # Anything else is the scrape itself: a selector that no longer matches, a consent
+        # screen that changed, a payload the API refused. Failing the search is the point —
+        # it carries the message to the panel, where somebody sees it. Bouncing it silently
+        # instead would hide a broken scraper behind a queue that never empties.
         logger.exception("Search job %s failed", job["id"])
         try:
             fail_search_job(job["id"], str(e))

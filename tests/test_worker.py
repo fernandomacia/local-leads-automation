@@ -487,3 +487,50 @@ class TestKnownDomainCheck:
         # would lose the whole search over a check that is only an optimisation.
         with patch("worker.check_known_domains", side_effect=requests.ConnectionError("down")):
             assert _known_domain_check()("ejemplo.es") is False
+
+
+# ── What ends a search, and what only interrupts it ───────────────────────────
+
+class TestSearchFailureVsInterruption:
+    _SEARCH = {"id": "s1", "profession": "fontaneros", "city": "Elche", "max_results": None}
+
+    def test_a_broken_scrape_fails_the_search(self):
+        # The message is what reaches the panel, where somebody sees it. Bouncing this back
+        # to the queue would hide a broken scraper behind a job that never finishes.
+        with patch("worker.scrape_incrementally", side_effect=RuntimeError("selector gone")), \
+             patch("worker.fail_search_job") as fail, \
+             patch("worker.release_search_job") as release:
+            run_search_job(dict(self._SEARCH))
+
+        fail.assert_called_once()
+        assert fail.call_args.args[0] == "s1"
+        release.assert_not_called()
+
+    @pytest.mark.parametrize("error", [
+        requests.ConnectionError("API down"),
+        requests.Timeout("too slow"),
+    ])
+    def test_losing_the_api_releases_the_search_instead(self, error):
+        # A network fault says nothing about the search, and recording a failure means
+        # calling the same API that just could not be reached.
+        with patch("worker.scrape_incrementally", side_effect=error), \
+             patch("worker.fail_search_job") as fail, \
+             patch("worker.release_search_job") as release:
+            run_search_job(dict(self._SEARCH))
+
+        release.assert_called_once_with("s1")
+        fail.assert_not_called()
+
+    def test_an_api_error_response_still_fails_the_search(self):
+        # An HTTPError is the API answering — a payload it refused, say — not the API being
+        # out of reach, so it keeps the terminal treatment.
+        response = requests.Response()
+        response.status_code = 422
+
+        with patch("worker.scrape_incrementally", side_effect=requests.HTTPError(response=response)), \
+             patch("worker.fail_search_job") as fail, \
+             patch("worker.release_search_job") as release:
+            run_search_job(dict(self._SEARCH))
+
+        fail.assert_called_once()
+        release.assert_not_called()
