@@ -1,7 +1,9 @@
-"""Personalized outreach email and phone script generation via the OpenRouter API.
+"""Phone argumentario generation via the OpenRouter API.
 
 The model receives raw structured data about a lead's web presence and returns
-a JSON object with a complete email (subject + body) and a phone argumentario.
+a JSON object with the argumentario the agent reads on the call. Outreach is
+semi-manual by design, and a drafted email was one more thing to review before
+sending; the call is where the pitch is actually made.
 """
 
 import json
@@ -46,28 +48,21 @@ def _retry_delay(resp: requests.Response, attempt: int) -> float:
     return min(2 ** attempt + random.uniform(0, 1), 60.0)
 
 SYSTEM_PROMPT = f"""Eres un agente comercial de {SENDER_COMPANY}, empresa especializada en diseño web y SEO para negocios locales.
-Tu tarea es generar materiales de venta personalizados para un negocio local.
+Tu tarea es generar el argumentario de venta para la llamada a un negocio local.
 
 Recibirás datos sobre el negocio. Transforma la información en argumentos de negocio concretos: pérdida de visibilidad, falta de credibilidad o clientes potenciales que no llegan. Nunca menciones tecnicismos directamente, solo sus consecuencias reales.
 
 ESCENARIO A — El negocio tiene sitio web (tiene_web: true):
-Genera email completo Y argumentario. El pitch se basa en los problemas SEO detectados en la web y los de la ficha de Google Maps.
+El pitch se basa en los problemas SEO detectados en la web y los de la ficha de Google Maps.
 - Caso especial: si cms es "unreachable", el sitio web existe en la ficha de Google Maps pero está caído o no es accesible. El pitch principal es que los clientes que buscan el negocio en Google no pueden acceder a la web (pérdida directa de clientes). No menciones análisis SEO técnico. Usa este problema como argumento para ofrecer un sitio nuevo o la recuperación del actual.
 
 ESCENARIO B — El negocio NO tiene sitio web (tiene_web: false):
 El pitch principal es la ausencia de presencia online y los problemas de la ficha de Google Maps.
-- Si hay email_contacto: genera email completo Y argumentario.
-- Si NO hay email_contacto: devuelve subject y body como cadenas vacías; genera solo argumentario.
-
-NORMAS DEL EMAIL:
-- Tratamiento de usted en todo momento
-- Estructura completa: saludo personalizado al equipo del negocio, presentación de {SENDER_COMPANY} como empresa especializada en diseño web y SEO, descripción de los problemas detectados y su impacto en el negocio, propuesta de auditoría gratuita y sin compromiso, despedida cordial, firma con el texto literal [NOMBRE] (sin modificarlo) seguido del nombre de la empresa {SENDER_COMPANY}
-- El emisor es un representante de la empresa, no un especialista técnico personal
-- Tono profesional pero cercano; directo, sin rodeos ni frases hechas
-- Sin emojis, sin exclamaciones
-- Máximo 250 palabras
 
 NORMAS DEL ARGUMENTARIO:
+- Quien llama es un representante de {SENDER_COMPANY}, no un especialista técnico
+- Tratamiento de usted en todo momento
+- Tono profesional pero cercano; directo, sin rodeos ni frases hechas
 - Estructurado en fases claramente etiquetadas: Apertura, Identificación del problema, Impacto en el negocio, Propuesta, Objeciones
 - Frases cortas y directas, listas para leer en voz alta
 - Al menos 2 objeciones frecuentes con su respuesta concisa
@@ -95,11 +90,11 @@ agrupada, para no diluir el argumento principal.
 3. Rastreadores activos sin aviso de cookies: se está siguiendo al visitante
    antes de que pueda decidir.
 4. Falta de política de cookies: incumplimiento informativo, el menos urgente.
-Si solo hay hallazgos del nivel 4, no montes el email entero sobre ellos: menciónalo
+Si solo hay hallazgos del nivel 4, no montes el argumentario entero sobre ellos: menciónalo
 de pasada y apóyate en los problemas de SEO o de la ficha de Google Maps.
 
 Responde ÚNICAMENTE con JSON válido, sin texto adicional:
-{{"subject": "asunto del email (máx. 60 caracteres, sin signos de exclamación)", "body": "email completo listo para enviar", "phone_script": "argumentario estructurado para la llamada"}}"""
+{{"phone_script": "argumentario estructurado para la llamada"}}"""
 
 
 def _build_prompt(lead: dict) -> str:
@@ -123,7 +118,6 @@ def _build_prompt(lead: dict) -> str:
         "problemas_seo": seo_problems,
         "problemas_google_maps": maps_problems,
         "problemas_legales": compliance_problems,
-        "email_contacto": lead.get("email", "") or "",
         "redes_sociales": social,
     }
 
@@ -238,37 +232,25 @@ def _parse(raw: str) -> dict:
 
 
 def generate(lead: dict) -> dict:
-    """Generate a personalized outreach email and phone argumentario for a lead.
+    """Generate the phone argumentario for a lead.
 
     Args:
         lead: Enriched lead dict from web_analyzer, optionally extended with
               ``city`` and ``profession`` from the job payload.
 
     Returns:
-        Dict with keys ``subject``, ``body``, and ``phone_script``.
-        Falls back to stub values if the model output cannot be parsed.
+        Dict with a ``phone_script`` key, empty when the model output cannot be
+        parsed — the lead is still reported, so it settles rather than holding
+        its parent search open over a pitch the agent can write himself.
     """
     name = lead.get("lead", "")
 
     raw = _complete(_build_prompt(lead))
 
     try:
-        parsed = _parse(raw)
-
-        phone_raw = parsed.get("phone_script") or ""
+        phone_raw = _parse(raw).get("phone_script") or ""
         phone_text = _dict_to_text(phone_raw) if isinstance(phone_raw, dict) else str(phone_raw)
-
-        has_email_channel = lead.get("has_website") or bool(lead.get("email"))
-        result = {
-            "subject": (parsed.get("subject") or (f"Propuesta de mejora web para {name}" if has_email_channel else "")).strip(),
-            "body": (parsed.get("body") or "").replace("\\n", "\n").strip(),
-            "phone_script": phone_text.replace("\\n", "\n").strip(),
-        }
-        return result
+        return {"phone_script": phone_text.replace("\\n", "\n").strip()}
     except (ValueError, KeyError) as exc:
         logger.exception("AI parse failed for '%s': %s — raw: %.200r", name, exc, raw)
-        return {
-            "subject": f"Propuesta de mejora web para {name}",
-            "body": "",
-            "phone_script": "",
-        }
+        return {"phone_script": ""}

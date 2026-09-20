@@ -35,7 +35,7 @@ scraper/
     rendering.py             # Playwright fallback for footers built client-side
     forms.py                 # Form consent (missing, link-only, pre-ticked)
 ai/
-  message_generator.py       # Generates personalized outreach emails via OpenRouter API
+  message_generator.py       # Generates the phone argumentario via OpenRouter API
 api/
   client.py                  # SegurSEO-API job-queue client: every call through one _request()
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
@@ -234,8 +234,11 @@ def analyze_website(url: str) -> dict:
   `failed: true`.
 
 ### Outreach
-- Final sending is semi-manual (not mass automated) to comply with GDPR
-- AI-generated messages are drafts to review before sending
+- The pitch is made on the call. The generator produces the argumentario and nothing
+  else: a drafted email was one more text to review before sending, for a channel the
+  agent was not using
+- Contact is semi-manual (not mass automated) to comply with GDPR
+- The argumentario is a draft to read and adapt, never a script to recite
 
 ---
 

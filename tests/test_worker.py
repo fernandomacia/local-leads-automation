@@ -166,11 +166,13 @@ class TestMapAnalysisToApiShape:
         result = map_analysis_to_api_shape(analysis, {})
         assert "social_networks" not in result
 
-    def test_subject_and_body_included(self):
+    def test_the_email_draft_is_never_sent(self):
+        # Dropped in 2.7.0: the pitch is made on the call, and the API has no
+        # column for a draft any more.
         message = {"subject": "Asunto", "body": "Cuerpo", "phone_script": "Script"}
         result = map_analysis_to_api_shape({}, message)
-        assert result["email_subject"] == "Asunto"
-        assert result["email_body"] == "Cuerpo"
+        assert "email_subject" not in result
+        assert "email_body" not in result
         assert result["phone_script"] == "Script"
 
 
@@ -260,7 +262,7 @@ class TestRenderAccounting:
 
     def _run(self, analysis: dict) -> bool:
         with patch("worker.analyze", return_value=analysis), \
-             patch("worker.generate", return_value={"subject": "s", "body": "b"}), \
+             patch("worker.generate", return_value={"phone_script": "Argumentario"}), \
              patch("worker.report_analysis"):
             return run_analysis_job(dict(_JOB))
 
@@ -373,12 +375,8 @@ class TestFieldLimits:
 
     def test_a_long_pitch_is_cut(self):
         # Written by an LLM, so this is the normal case rather than an anomaly.
-        message = {"subject": "S" * 400, "body": "B" * 9000, "phone_script": "P" * 6000}
-        result = map_analysis_to_api_shape({}, message)
-        assert len(result["email_subject"]) == 255
+        result = map_analysis_to_api_shape({}, {"phone_script": "P" * 6000})
         assert len(result["phone_script"]) == 5000
-        # email_body has no ceiling on the API side, so it goes as written.
-        assert len(result["email_body"]) == 9000
 
     def test_an_absurd_email_is_dropped(self):
         assert "email" not in map_analysis_to_api_shape({"email": "a" * 300 + "@x.es"}, {})
@@ -409,7 +407,7 @@ class TestReportRejected:
         response.status_code = 422
 
         with patch("worker.analyze", return_value={"cms": "wordpress", "seo_score": 60}), \
-             patch("worker.generate", return_value={"subject": "s", "body": "b"}), \
+             patch("worker.generate", return_value={"phone_script": "Argumentario"}), \
              patch("worker.report_analysis", side_effect=ReportRejected(response=response)) as report, \
              patch("worker.release_analysis_job") as release:
             assert run_analysis_job(dict(_JOB)) is False
@@ -426,7 +424,7 @@ class TestReportRejected:
 
         with patch("worker.analyze", return_value={"cms": "wordpress", "seo_score": 60,
                                                   "compliance_rendered": True}), \
-             patch("worker.generate", return_value={"subject": "s", "body": "b"}), \
+             patch("worker.generate", return_value={"phone_script": "Argumentario"}), \
              patch("worker.report_analysis", side_effect=ReportRejected(response=response)):
             assert run_analysis_job(dict(_JOB)) is True
 

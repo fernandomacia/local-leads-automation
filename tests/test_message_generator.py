@@ -98,35 +98,29 @@ class TestDictToText:
 
 # ── generate() end-to-end (mocked API) ───────────────────────────────────────
 
-_VALID_RESPONSE = (
-    '{"subject": "Mejora tu web", '
-    '"body": "Estimados señores,\\nHemos analizado su web...", '
-    '"phone_script": "Apertura: Buenos días..."}'
-)
+_VALID_RESPONSE = '{"phone_script": "Apertura: Buenos días...\\nHemos analizado su web..."}'
 
 
 class TestGenerate:
     @patch("ai.message_generator._complete", return_value=_VALID_RESPONSE)
-    def test_returns_all_keys(self, _):
+    def test_returns_only_the_phone_script(self, _):
+        # The email draft is gone: anything else here would reach a payload that
+        # no longer has a field for it.
         result = generate({"lead": "Test", "has_website": True})
-        assert set(result.keys()) >= {"subject", "body", "phone_script"}
+        assert set(result) == {"phone_script"}
 
     @patch("ai.message_generator._complete", return_value=_VALID_RESPONSE)
     def test_newline_escape_sequences_expanded(self, _):
-        result = generate({"lead": "Test", "has_website": True})
-        assert "\n" in result["body"]
+        assert "\n" in generate({"lead": "Test", "has_website": True})["phone_script"]
 
     @patch("ai.message_generator._complete", return_value="esto no es json")
-    def test_parse_failure_returns_safe_fallback(self, _):
-        result = generate({"lead": "Negocio Test", "has_website": True})
-        assert result["body"] == ""
-        assert result["phone_script"] == ""
-        assert "Negocio Test" in result["subject"]
+    def test_parse_failure_returns_an_empty_script(self, _):
+        # Reported as "" rather than raised: the lead settles instead of holding
+        # its parent search open over a pitch the agent can write himself.
+        assert generate({"lead": "Negocio Test", "has_website": True}) == {"phone_script": ""}
 
     @patch("ai.message_generator._complete",
-           return_value='{"subject": "", "body": "", "phone_script": "Argumentario"}')
-    def test_no_website_no_email_empty_subject_and_body(self, _):
-        result = generate({"lead": "Test", "has_website": False, "email": ""})
-        assert result["subject"] == ""
-        assert result["body"] == ""
-        assert result["phone_script"] == "Argumentario"
+           return_value='{"phone_script": {"Apertura": "Buenos días", "Cierre": "Gracias"}}')
+    def test_a_structured_script_is_flattened_to_text(self, _):
+        script = generate({"lead": "Test", "has_website": True})["phone_script"]
+        assert "--- Apertura ---" in script and "Buenos días" in script

@@ -1,6 +1,6 @@
 # local-leads-automation
 
-Lead generation tool for web developers. Extracts local businesses from Google Maps, analyzes their website quality, and generates personalized outreach emails using an LLM via OpenRouter.
+Lead generation tool for web developers. Extracts local businesses from Google Maps, analyzes their website quality, and generates a personalized phone argumentario using an LLM via OpenRouter.
 
 **Use case:** Find businesses with poor websites (insecure, no SEO, outdated) and contact them offering improvement services.
 
@@ -13,7 +13,7 @@ SegurSEO Platform (Angular) → SegurSEO-API (Laravel) queues the work
   → claim a search and scrape Google Maps (name, website, phone, address, city, province)
   → report each batch, with what the Maps card was missing
   → claim a lead and analyse its site (CMS, email, socials, SEO score, legal compliance)
-  → generate the outreach email and the phone script (OpenRouter LLM)
+  → generate the phone argumentario (OpenRouter LLM)
   → report the analysis back
   → assisted manual outreach, from the panel
 ```
@@ -99,8 +99,6 @@ Requires API ≥ 3.1.0.
 | `compliance_details` | Web | Evidence per legal document: status, URL found, language, method |
 | `compliance_language` | Web | Language the site declares (`html[lang]`, `og:locale`, `hreflang`) |
 | `maps_issues` | Maps | Listing gap key → Spanish label (see below) |
-| `email_subject` | AI | Generated email subject line |
-| `email_body` | AI | Generated email body (ready to send) |
 | `phone_script` | AI | Generated phone script for the sales call |
 
 ### SEO issues detected
@@ -247,7 +245,7 @@ scraper/
     rendering.py             # Chromium fallback for JS-built footers
     forms.py                 # Form consent
 ai/
-  message_generator.py       # Generates outreach emails via OpenRouter
+  message_generator.py       # Generates the phone argumentario via OpenRouter
 api/
   client.py                  # SegurSEO-API job-queue client (used by worker.py)
 config.py                    # Scraper, OpenRouter, sender, and API worker configuration

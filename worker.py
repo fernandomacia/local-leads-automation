@@ -74,7 +74,6 @@ _FIELD_LIMITS: dict[str, tuple[int, bool]] = {
     "province":      (100,  True),
     "cms":           (50,   True),
     "email":         (255,  False),
-    "email_subject": (255,  True),
     "phone_script":  (5000, True),
     "found_url":     (2048, False),
     "method":        (20,   True),
@@ -182,11 +181,6 @@ def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
     if analysis.get("seo_issues"):
         payload["seo_issues"] = analysis["seo_issues"]
 
-    if message.get("subject"):
-        payload["email_subject"] = _fit("email_subject", message["subject"])
-    if message.get("body"):
-        # No ceiling on the API side, so it goes as written.
-        payload["email_body"] = message["body"]
     # Always send phone_script (even "") so NULL stays exclusive to "not yet analyzed"
     payload["phone_script"] = _fit("phone_script", message.get("phone_script", ""))
 
