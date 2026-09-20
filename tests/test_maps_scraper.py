@@ -11,8 +11,63 @@ from scraper.maps_scraper import (
     SELECTOR_WEBSITE,
     _extract_business,
     _normalize_domain,
+    canonical_website,
     scrape_incrementally,
 )
+
+
+# ── The website as recorded ───────────────────────────────────────────────────
+
+class TestCanonicalWebsite:
+    def test_the_card_link_is_reduced_to_the_site(self):
+        # The lead that prompted this: the Business Profile pointed at a tracked,
+        # per-locality landing page, so the audit scored an English satellite page and
+        # reported a law firm in Alicante as an English-language site.
+        assert canonical_website(
+            "http://www.pellicerheredia.com/en/hondon-de-las-nieves-lawyers"
+            "?utm_source=Google&utm_medium=My%20Business"
+        ) == "http://www.pellicerheredia.com"
+
+    @pytest.mark.parametrize("href, expected", [
+        ("https://ejemplo.es/", "https://ejemplo.es"),
+        ("https://ejemplo.es", "https://ejemplo.es"),
+        ("https://www.ejemplo.es/tienda/categoria#top", "https://www.ejemplo.es"),
+        ("http://ejemplo.es?utm_source=Google", "http://ejemplo.es"),
+    ])
+    def test_query_fragment_and_path_are_dropped(self, href, expected):
+        assert canonical_website(href) == expected
+
+    @pytest.mark.parametrize("href, expected", [
+        ("https://minegocio.wixsite.com/peluqueria/contacto",
+         "https://minegocio.wixsite.com/peluqueria"),
+        ("https://sites.google.com/view/minegocio/inicio",
+         "https://sites.google.com/view/minegocio"),
+        ("https://linktr.ee/minegocio?utm_source=Google", "https://linktr.ee/minegocio"),
+    ])
+    def test_a_site_that_lives_on_a_path_keeps_it(self, href, expected):
+        # Trimming these to the host would audit the builder's own marketing homepage
+        # and file the findings under the lead.
+        assert canonical_website(href) == expected
+
+    def test_a_path_hosted_url_with_no_path_is_left_at_the_host(self):
+        assert canonical_website("https://linktr.ee/") == "https://linktr.ee"
+
+    def test_the_scheme_is_kept_as_the_card_wrote_it(self):
+        # http is a finding of its own (no_https); upgrading it here would hide it.
+        assert canonical_website("http://ejemplo.es/x").startswith("http://")
+
+    def test_credentials_never_survive(self):
+        # They would reach the panel and every request the analysis makes.
+        assert canonical_website("https://user:pass@ejemplo.es/x") == "https://ejemplo.es"
+
+    def test_a_port_is_kept(self):
+        assert canonical_website("https://ejemplo.es:8443/a/b") == "https://ejemplo.es:8443"
+
+    @pytest.mark.parametrize("href", ["", "   ", "mailto:info@ejemplo.es", "ejemplo.es/tienda"])
+    def test_anything_that_is_not_an_http_url_is_left_alone(self, href):
+        # Including the scheme-less case: it cannot be confirmed to be a URL, and the
+        # Maps website button always carries a scheme.
+        assert canonical_website(href) == href.strip()
 
 
 # ── Domain normalization ──────────────────────────────────────────────────────
@@ -141,6 +196,10 @@ class TestExtractBusiness:
         result = _extract_business(page, "Elche")
         assert result["zip_code"] == "03201"
         assert result["address"].startswith("Calle")
+
+    def test_the_extracted_website_is_the_canonical_one(self):
+        page = _make_page(website="https://ejemplo.es/es/servicios?utm_source=Google")
+        assert _extract_business(page, "Elche")["website"] == "https://ejemplo.es"
 
     def test_no_website_returns_empty_string(self):
         page = _make_page(website="")

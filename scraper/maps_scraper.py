@@ -146,7 +146,7 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
     name = page.locator(SELECTOR_NAME).inner_text()
 
     authority = page.locator(SELECTOR_WEBSITE)
-    website = authority.first.get_attribute("href") if authority.count() > 0 else ""
+    website = canonical_website(authority.first.get_attribute("href")) if authority.count() > 0 else ""
 
     phone_el = page.locator(SELECTOR_PHONE)
     phone = phone_el.first.get_attribute("href").replace("tel:", "") if phone_el.count() > 0 else ""
@@ -202,6 +202,67 @@ def _extract_with_retries(page: Page, href: str, default_city: str = "") -> dict
         except PlaywrightError:
             return None
     return None
+
+
+# Hosts that give each customer a path instead of a subdomain, with the number of
+# segments that identify the customer's own site. Trimming those to the host would
+# audit the builder's marketing homepage and file the findings under the lead.
+_PATH_HOSTED_SITES: dict[str, int] = {
+    "wixsite.com": 1,          # user.wixsite.com/minegocio
+    "sites.google.com": 2,     # sites.google.com/view/minegocio
+    "linktr.ee": 1,
+    "taplink.cc": 1,
+    "bio.link": 1,
+    "beacons.ai": 1,
+    "about.me": 1,
+}
+
+
+def _path_segments_to_keep(host: str) -> int:
+    """Return how many path segments identify the site on this host, 0 for most."""
+    host = host.lower().removeprefix("www.")
+    return next((n for h, n in _PATH_HOSTED_SITES.items()
+                 if host == h or host.endswith(f".{h}")), 0)
+
+
+def canonical_website(href: str) -> str:
+    """Return the business's site as it should be recorded, from the card's link.
+
+    What the card carries is whatever the owner typed into Google Business Profile,
+    and for anyone with an agency that is routinely a tracked landing page rather
+    than the site: a real lead arrived as
+    ``/en/hondon-de-las-nieves-lawyers?utm_source=Google&utm_medium=My%20Business``.
+    Stored verbatim, that is the page the analyzer audits — so a law firm in Alicante
+    was scored on an English satellite landing page and reported as an English-language
+    site, which is what the agent was then told to call in.
+
+    Three rules, and the third is the one with an exception behind it:
+
+    - The query and the fragment always go. Tracking is never part of the site.
+    - On a host that sells paths rather than subdomains, the segments that name the
+      customer's site stay — ``wixsite.com`` trimmed to its host is Wix's own homepage.
+    - Everything else reduces to scheme and host.
+
+    Userinfo is dropped with the rest: credentials in a Maps listing are a mistake, and
+    they would travel to the panel and into every request the analysis makes.
+    """
+    href = (href or "").strip()
+    try:
+        parsed = urlparse(href)
+    except ValueError:
+        return href
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return href
+
+    host = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+    root = f"{parsed.scheme}://{host}"
+
+    if keep := _path_segments_to_keep(parsed.hostname):
+        segments = [seg for seg in parsed.path.split("/") if seg][:keep]
+        return f"{root}/{'/'.join(segments)}" if segments else root
+
+    return root
 
 
 def _to_ascii(host: str) -> str:

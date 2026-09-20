@@ -83,7 +83,7 @@ Requires API ≥ 3.1.0.
 | Field | Source | Description |
 |---|---|---|
 | `lead` | Maps | Business name |
-| `website` | Maps | Website hostname |
+| `website` | Maps | The site itself, reduced from the card's link: query, fragment and path dropped, except on hosts that sell paths rather than subdomains |
 | `maps_url` | Maps | Google Maps listing URL |
 | `phone` | Maps | Phone number |
 | `address` | Maps | Street address |

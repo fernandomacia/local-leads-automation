@@ -130,6 +130,14 @@ def analyze_website(url: str) -> dict:
 - A positive answer is cached and a negative one is not, so a second card sharing one
   website is skipped once the first has been reported. A failed check answers "not known":
   the API deduplicates at ingest anyway, and losing a search over an optimisation would not
+- **The card's link is not the site.** What the owner typed into Google Business
+  Profile is routinely a tracked landing page — one real lead arrived as
+  `/en/hondon-de-las-nieves-lawyers?utm_source=Google&utm_medium=My%20Business`, and
+  stored verbatim that is the page the analyzer audits: a law firm in Alicante scored on
+  an English satellite page and reported as an English-language site. `canonical_website()`
+  reduces it at extraction, so what is stored, audited and shown are the same thing.
+  The exception is `_PATH_HOSTED_SITES`: on `wixsite.com` or `sites.google.com` the path
+  *is* the customer's site, and trimming it would audit the builder's own homepage
 - `MAX_IDLE_SCROLLS` bounds `scrape_incrementally()`: it stops after that many
   consecutive scroll waves with no new hrefs at all (end of feed), so an
   exhausted search doesn't scroll forever. Known (skipped) leads reset the
