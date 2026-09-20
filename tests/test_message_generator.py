@@ -95,6 +95,20 @@ class TestDictToText:
         text = _dict_to_text(d)
         assert "· Precio alto: Ofrecemos financiación" in text
 
+    def test_list_of_pairs_is_read_aloud_not_dumped(self):
+        # The shape the model actually returns for Objeciones. It used to fall through
+        # to str(), printing a Python repr into the middle of the call script.
+        d = {"Objeciones": [
+            {"objeción": "Ya tenemos quien la gestiona", "respuesta": "Es una segunda opinión"},
+        ]}
+        text = _dict_to_text(d)
+        assert "· objeción: Ya tenemos quien la gestiona — respuesta: Es una segunda opinión" in text
+        assert "{" not in text and "'" not in text
+
+    def test_list_of_plain_strings(self):
+        text = _dict_to_text({"Apertura": ["Buenos días", "Le llamo de SegurSEO"]})
+        assert "· Buenos días" in text and "· Le llamo de SegurSEO" in text
+
 
 # ── generate() end-to-end (mocked API) ───────────────────────────────────────
 

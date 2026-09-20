@@ -203,14 +203,30 @@ def _try_load_json(s: str) -> dict | None:
     return None
 
 
+def _inline(value) -> str:
+    """One value on a single line, a dict of objection/answer included."""
+    if isinstance(value, dict):
+        return " — ".join(f"{k}: {v}" for k, v in value.items())
+    if isinstance(value, list):
+        return "; ".join(_inline(v) for v in value)
+    return str(value)
+
+
 def _dict_to_text(d: dict) -> str:
-    """Flatten a structured dict (phase label → content) into readable plain text."""
+    """Flatten a structured dict (phase label → content) into readable plain text.
+
+    Every shape the model returns has to come out as something an agent can read aloud.
+    A list was falling through to ``str()``, which printed a Python repr — quotes,
+    braces and all — into the middle of the script, and the Objeciones section is
+    precisely where the model likes to return a list of pairs.
+    """
     lines = []
     for section, content in d.items():
         lines.append(f"--- {section} ---")
         if isinstance(content, dict):
-            for k, v in content.items():
-                lines.append(f"· {k}: {v}")
+            lines.extend(f"· {k}: {_inline(v)}" for k, v in content.items())
+        elif isinstance(content, list):
+            lines.extend(f"· {_inline(item)}" for item in content)
         else:
             lines.append(str(content))
     return "\n\n".join(lines)
