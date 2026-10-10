@@ -30,7 +30,8 @@ worker's and as "email or any social network", and it was neither.
 
 - Python 3.13+
 - OpenRouter API key (for message generation)
-- SegurSEO-API running with a valid worker token
+- SegurSEO-API ≥ 4.0.0, with a worker token issued for that environment
+  (see the Compatibility table in `SegurSEO-API/README.md`)
 
 ---
 
@@ -68,6 +69,11 @@ Runs continuously, polling SegurSEO-API for pending search and analysis jobs.
 Requires `API_BASE_URL` and `API_TOKEN` in `.env`. Jobs are created via the
 Angular frontend — results are reported straight to the API via
 `report_leads()` / `report_analysis()`.
+
+On start the worker asks which API to use: `.env` (local) or `.env.production`.
+Set `WORKER_ENV_FILE` to skip the question, which an unattended run must do.
+`.env.production` must be a full copy of `.env`, not just the changed lines: a
+terminal that already exported the local values keeps any variable it lacks.
 
 **Ctrl+C hands the job in hand back to the queue** (`release_search_job` /
 `release_analysis_job`), so the search is claimable again immediately and the lead keeps
@@ -249,6 +255,7 @@ ai/
 api/
   client.py                  # SegurSEO-API job-queue client (used by worker.py)
 config.py                    # Scraper, OpenRouter, sender, and API worker configuration
+env_select.py                # Asks which API to use, before config.py loads anything
 .env                         # Secrets (do not commit)
 ```
 

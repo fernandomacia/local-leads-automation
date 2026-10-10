@@ -18,9 +18,6 @@ from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, SENDER_COMPANY, SOCIAL_
 
 logger = logging.getLogger(__name__)
 
-if not SENDER_COMPANY:
-    raise EnvironmentError("SENDER_COMPANY must be set in .env")
-
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 4

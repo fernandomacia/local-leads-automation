@@ -5,6 +5,13 @@ keeps the API's lead database in sync. Runs continuously as a background
 daemon, driven entirely by the API.
 """
 
+# Before any import that reaches config.py, which loads the env file at import time.
+# Guarded so importing this module (the tests do) never prompts.
+if __name__ == "__main__":
+    from env_select import choose_env_file
+
+    choose_env_file()
+
 import logging
 import random
 import sys

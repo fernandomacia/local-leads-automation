@@ -39,6 +39,7 @@ ai/
 api/
   client.py                  # SegurSEO-API job-queue client: every call through one _request()
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
+env_select.py                # Asks which env file to load, before config.py reads one
 ```
 
 ## Tech Stack
@@ -142,6 +143,23 @@ def analyze_website(url: str) -> dict:
   consecutive scroll waves with no new hrefs at all (end of feed), so an
   exhausted search doesn't scroll forever. Known (skipped) leads reset the
   counter — only a truly empty scroll wave counts as idle.
+
+### Configuration
+
+- **The env file is chosen before anything imports `config.py`**, which reads it at import
+  time. `worker.py` asks under `if __name__ == "__main__"` so importing it — as the tests
+  do — never prompts, and `WORKER_ENV_FILE` skips the question for an unattended run. A
+  relative name resolves against the repo; an absolute one is taken as given, so a service
+  unit can keep its file outside the checkout.
+- **`.env.production` is a full copy, not a diff of `.env`.** Only one file is loaded, and
+  `override=True` means a variable it lacks keeps whatever the shell already exported —
+  or nothing.
+- **A credential that is only needed later is still checked at startup.** OpenRouter
+  answers a missing key with 401, and 401 is not the 402 the worker treats as a funding
+  pause: every lead of the search is reported `failed: True` and retired for good, one at
+  a time, until the search ends with nothing analysed. `config.py` refuses to import
+  instead, naming the file that is short a line. Anything else the pipeline cannot run
+  without belongs in that same guard.
 
 ### Reporting to the API
 
