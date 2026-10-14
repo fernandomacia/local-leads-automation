@@ -144,6 +144,68 @@ def analyze_website(url: str) -> dict:
   exhausted search doesn't scroll forever. Known (skipped) leads reset the
   counter — only a truly empty scroll wave counts as idle.
 
+### Job order
+
+- **A search is finished before the next one is claimed.** `main()` claims analyses
+  first, so a search is scraped and then analysed to the end, which is the lifecycle the
+  API already describes: pending, scraping, analyzing, completed. Claiming searches first
+  left two of them in `analyzing` at once and their leads analysed as one
+  indistinguishable stream.
+- **What it costs is discovery latency.** Queue three searches and the third is not
+  scraped until the first two are analysed, so its leads do not exist in the panel until
+  then — where claiming searches first had every lead discovered within minutes and
+  analysed later. The total work is the same; only the order changes.
+- **Analyses left over from an earlier run are claimed before the first search**, which
+  is what the operator sees after restarting the worker mid-run. Those leads name their
+  own search in the payload they arrive with, so their line is titled after it rather
+  than being lumped together.
+
+### Terminal output
+
+- **A 429 is not a failed lead.** OpenRouter's rate limit reaches the worker only once
+  the generator's own four retries have given up, and answering it the way every other
+  HTTP error is answered — `failed: True` — retired leads for good over a limit that had
+  lifted a minute later. It releases the lead and pauses the loop instead; 402 is handled
+  the same way, plus the payment warning to the search.
+- **Log records clear the counter before they print.** Logging writes to stderr and the
+  counter to stdout, so on a terminal a warning arrived on the same row as the lead being
+  analysed, starting at whatever column the counter had padded to.
+  `_ProgressAwareHandler` is installed by `basicConfig` for that alone.
+- **A rule heads each block of work**, printed whether or not this is a terminal: a run
+  piped to a file is read the same way, and the rule is what tells one search's lines
+  from the next's. A run of leads left queued by an earlier run gets one too — nothing
+  else heads it, since no search of this round found them.
+- **The startup lines answer "what is this talking to" and "how do I stop it".** The
+  Ctrl+C hint is printed only on a terminal: `systemctl stop` arrives as SIGTERM, which
+  kills the process without the release Ctrl+C performs, so there the advice would be
+  wrong and unfollowable. Nothing handles SIGTERM today — a job held when it arrives
+  waits for the API's stale-claim recovery.
+- **Three lines per search, not one per lead.** Search, Search done, Analysis done. The
+  third is the counter rewritten in place while the run goes, replaced by
+  `_analysis_done_lines()` when the queue empties, so fifty leads leave three lines
+  behind. `run_analysis_job` answers whether the lead was analysed and the caller counts
+  it, rather than printing anything itself.
+- **The counts reset when a search is claimed**, whether or not anything was analysed: a
+  search that found no leads produces no analyses, and its row used to linger and be
+  counted under the next search's line.
+- **A run covering more than one search names each.** That is what a restart
+  mid-analysis produces, and those leads have no Search line of this round above them to
+  say which search the count belongs to.
+- **Only what the operator acts on.** The lines answer "which search, how many leads,
+  how many analysed". Average score, finding counts and the browser tally were removed:
+  the first two are in the panel per lead, and the third measured a cost of running the
+  worker rather than anything about the leads.
+- **Every in-place write pads to `_LINE_WIDTH`.** `\r` only moves the cursor, so a lead
+  with a short name following one with a long name left the tail of the longer on screen.
+- **Nothing in the progress line may raise.** It is printed from inside the analysis, so
+  an exception there is caught by that handler and reported to the API as a lead that
+  failed to analyse — which is how a missing denominator or a terminal that cannot encode
+  a block character would cost a lead. `_analysis_progress` falls back to a bare counter
+  when there is no usable total, and the bar glyphs fall back to ASCII.
+- **The analysis queue is global, so the total is a hint.** It comes from the search just
+  scraped; leads left by an earlier run have none, and a longer queue runs past it. Both
+  drop the bar rather than draw a wrong one.
+
 ### Configuration
 
 - **The env file is chosen before anything imports `config.py`**, which reads it at import
@@ -155,8 +217,8 @@ def analyze_website(url: str) -> dict:
   `override=True` means a variable it lacks keeps whatever the shell already exported —
   or nothing.
 - **A credential that is only needed later is still checked at startup.** OpenRouter
-  answers a missing key with 401, and 401 is not the 402 the worker treats as a funding
-  pause: every lead of the search is reported `failed: True` and retired for good, one at
+  answers a missing key with 401, and 401 is neither the 402 nor the 429 the worker waits
+  out: every lead of the search is reported `failed: True` and retired for good, one at
   a time, until the search ends with nothing analysed. `config.py` refuses to import
   instead, naming the file that is short a line. Anything else the pipeline cannot run
   without belongs in that same guard.
@@ -179,12 +241,17 @@ def analyze_website(url: str) -> dict:
   omit a key to mean "nothing found", and never send `{}` for something that was not
   checked.
 - **A claim abandoned for a reason that is not the job's fault is released, never left to
-  recovery.** Ctrl+C and an OpenRouter 402 both say nothing about the lead, so they call
-  `release_analysis_job` / `release_search_job` and the work is claimable again at once;
+  recovery.** Ctrl+C and an OpenRouter 402 or 429 all say nothing about the lead, so they
+  call `release_analysis_job` / `release_search_job` and the work is claimable at once;
   the API's `scraper:recover-stale-jobs` is the backstop for a worker that *died*, and it
   costs `SCRAPER_CLAIM_TIMEOUT_MINUTES`. A genuine analysis failure is the opposite — it
   has used one of the lead's three attempts and must keep it. Note that `KeyboardInterrupt`
   is a `BaseException`: an `except Exception` will not see it.
+- **The interrupt handler wraps the waiting, not just the working.** `main()`'s sleeps —
+  the poll, and the longer pauses a rate limit and a payment error wait out — are where
+  an idle worker spends almost every second of its life, so that is where Ctrl+C lands.
+  With the handler inside the loop they sat outside it and an interrupt answered with a
+  traceback more often than not; it now encloses the whole loop.
 - **The same line divides a search that failed from one that was interrupted.** Losing the
   API mid-scrape — `ConnectionError`, `Timeout` — says nothing about the search, and
   recording a failure would mean calling the API that just could not be reached, so the
@@ -208,7 +275,9 @@ def analyze_website(url: str) -> dict:
   one someone will dial or write to. The same applies to `error_message`: a 422 on the *fail*
   call leaves the search looking like a live run.
 - **Releasing a claim refunds the attempt, so only release when the next try can succeed.**
-  A shutdown or a 402 will: the work is claimable again at once. A payload the API refused
+  A shutdown, a 402 or a 429 will: the work is claimable again at once, and the loop waits
+  the limit out — `_PAYMENT_PAUSE` for credit, which is topped up by hand, and the shorter
+  `_RATE_LIMIT_PAUSE` for a limit that lifts on its own. A payload the API refused
   will not — the re-claim gets refused identically and each round burns an LLM call, for
   ever. There the claim is left standing (`ReportRejected`), and stale-claim recovery plus
   the three-attempt ceiling bound it while the log names the refused fields.
@@ -237,9 +306,10 @@ def analyze_website(url: str) -> dict:
   internal are dropped at resolution, so the address never reaches the panel
   either. A host that merely fails to resolve is *not* internal — dropping those
   would turn a transient DNS failure into a "document never published" finding.
-- `run_analysis_job` returns whether the audit needed a browser, and the worker
-  reports the tally per batch. That number, not the request count, is what sizes
-  the host: a lead that renders costs a Chromium process.
+- A lead whose footer is built client-side costs a Chromium process, and that, not the
+  request count, is what sizes a host running this worker. It is no longer reported in
+  the terminal — it said nothing about the lead — so measuring it again means counting
+  `compliance_rendered`, which every analysis still carries.
 - Adding an issue key means declaring it in the API's `ComplianceIssue` enum,
   which serves the panel's filter dropdown through `GET /compliance-issues`;
   labels themselves need no change on either side. Statuses are stricter: the

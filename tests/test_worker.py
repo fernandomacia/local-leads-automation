@@ -9,7 +9,18 @@ import requests
 
 from api.client import ReportRejected
 from scraper.maps_scraper import maps_card_issues
+import logging
+from contextlib import ExitStack
+
+import worker
 from worker import (
+    _PAYMENT_PAUSE,
+    _RATE_LIMIT_PAUSE,
+    _RULE,
+    _analysis_progress,
+    main,
+    _analysis_done_lines,
+    _tally,
     _finish,
     _known_domain_check,
     _progress,
@@ -224,41 +235,142 @@ def _capture(is_tty: bool, *calls) -> str:
 
 class TestProgressOutput:
     def test_progress_overwrites_in_place_on_a_terminal(self):
-        out = _capture(True, (_progress, "[>] Analyzing 3"))
-        assert out == "\r[>] Analyzing 3"
+        out = _capture(True, (_progress, "[>] Analysing 3"))
+        assert out.startswith("\r[>] Analysing 3")
+
+    def test_the_line_is_padded_so_a_shorter_one_cannot_leave_a_tail(self):
+        # Lead names vary in length, and \r only moves the cursor: without the padding
+        # the end of the previous, longer name stayed on screen.
+        long_line = _capture(True, (_progress, "[>] Analysing [=] 1/2 — A business with a long name"))
+        short_line = _capture(True, (_progress, "[>] Analysing [=] 2/2 — Bar"))
+        assert len(long_line) == len(short_line)
 
     def test_progress_is_silent_when_not_a_terminal(self):
         # journald does not honour \r and would glue an unterminated write onto
         # the next log line, so the counter is dropped rather than fragmented.
-        assert _capture(False, (_progress, "[>] Analyzing 3")) == ""
+        assert _capture(False, (_progress, "[>] Analysing 3")) == ""
 
     def test_finish_clears_the_counter_on_a_terminal(self):
-        out = _capture(True, (_finish, "[+] Done (3 analyzed)"))
-        assert out.startswith("\r[+] Done (3 analyzed)")
+        out = _capture(True, (_finish, "[+] Done — 3 analysed"))
+        assert out.startswith("\r[+] Done — 3 analysed")
         assert out.endswith("\n")
 
+    def test_finish_pads_only_the_line_that_lands_on_the_counter(self):
+        # The closing block is two lines; the second starts on a row of its own and
+        # padding it would leave trailing spaces in the log.
+        out = _capture(True, (_finish, "[+] Done — 1 analysed\n    seo avg 50"))
+        first, second = out.rstrip("\n").split("\n")
+        assert len(first) > len("\r[+] Done — 1 analysed")
+        assert second == "    seo avg 50"
+
     def test_finish_writes_one_clean_line_when_not_a_terminal(self):
-        assert _capture(False, (_finish, "[+] Done (3 analyzed)")) == "[+] Done (3 analyzed)\n"
+        assert _capture(False, (_finish, "[+] Done — 3 analysed")) == "[+] Done — 3 analysed\n"
 
     def test_piped_run_emits_only_the_final_line(self):
         out = _capture(
             False,
-            (_progress, "[>] Analyzing 1"),
-            (_progress, "[>] Analyzing 2"),
-            (_finish, "[+] Done (2 analyzed)"),
+            (_progress, "[>] Analysing 1"),
+            (_progress, "[>] Analysing 2"),
+            (_finish, "[+] Done — 2 analysed"),
         )
-        assert out == "[+] Done (2 analyzed)\n"
+        assert out == "[+] Done — 2 analysed\n"
         assert "\r" not in out
 
 
-# ── run_analysis_job (browser accounting) ─────────────────────────────────────
+# ── The progress line and the closing block ───────────────────────────────────
+
+class TestAnalysisProgress:
+    def test_the_bar_fills_with_the_run(self):
+        assert "1/5" in _analysis_progress(1, 5, "Unive Abogados")
+        assert _analysis_progress(5, 5, "Unive").count("\u2588") == 12
+
+    def test_a_long_name_is_cut_rather_than_wrapped(self):
+        # A wrapped line breaks the overwrite: \r returns to the start of the last row.
+        line = _analysis_progress(1, 5, "Pellicer & Heredia Abogados Hondon de las Nieves y alrededores")
+        assert len(line) <= 74
+
+    @pytest.mark.parametrize("idx, total", [(0, 0), (3, 0), (6, 5)])
+    def test_without_a_usable_total_it_counts_instead_of_drawing_a_bar(self, idx, total):
+        # The analysis queue is global: leads left by an earlier run have no denominator,
+        # and dividing by it here would be reported to the API as a failed lead.
+        line = _analysis_progress(idx, total, "Ejemplo SL")
+        assert "\u2588" not in line and "\u2591" not in line
+        assert "/" not in line and "Ejemplo SL" in line
+
+
+def _search(label: str, found, analysed: int, failed: int = 0) -> dict:
+    return {"label": label, "found": found, "analysed": analysed, "failed": failed}
+
+
+class TestAnalysisDoneLines:
+    def test_the_usual_run_closes_the_search_it_belongs_to(self):
+        # Read as the third of the three lines a search prints, under its own heading,
+        # so it needs no label of its own.
+        out = _analysis_done_lines({"s1": _search("abogado en elche", 20, 20)})
+        assert out == "[+] Analysis done: 20 analysed"
+
+    def test_failures_are_named_beside_the_analyses(self):
+        out = _analysis_done_lines({"s1": _search("abogado en elche", 20, 18, failed=2)})
+        assert out == "[+] Analysis done: 18 analysed, 2 failed"
+
+    def test_several_searches_in_one_run_are_each_named(self):
+        # What a restart mid-analysis produces: leads from searches this run never
+        # headed with a Search line, so an unlabelled count would read as belonging to
+        # whichever search came next.
+        out = _analysis_done_lines({"s1": _search("abogado en elche", None, 12),
+                                    "s2": _search("fontanero en elche", None, 5)})
+        assert out.splitlines() == [
+            "[+] Analysis done — abogado en elche: 12 analysed",
+            "[+] Analysis done — fontanero en elche: 5 analysed",
+        ]
+
+    def test_a_lead_that_names_no_search_says_where_it_came_from(self):
+        out = _analysis_done_lines({"s1": _search("abogado en elche", None, 2),
+                                    "": _search("", None, 1)})
+        assert "from an earlier run: 1 analysed" in out
+
+
+def _lead(search_id: str, profession: str = "abogado", city: str = "elche") -> dict:
+    return {"id": "l1", "lead_search_id": search_id, "business_name": "Ejemplo SL",
+            "profession": profession, "city": city}
+
+
+class TestTally:
+    def test_a_lead_counts_against_the_search_that_found_it(self):
+        searches = {"s1": _search("abogado en elche", 20, 0)}
+        _tally(searches, _lead("s1"))["analysed"] += 1
+        assert searches["s1"]["analysed"] == 1
+
+    def test_a_lead_from_an_earlier_run_names_its_own_search(self):
+        # The normal case after a restart mid-analysis: analyses are claimed before
+        # searches, so these arrive before any search has a row. The lead carries the
+        # profession and city the pitch is written from, which is the search's name.
+        searches = {}
+        _tally(searches, _lead("s9", "fontanero", "alicante"))["analysed"] += 1
+        assert searches["s9"] == _search("fontanero en alicante", None, 1)
+
+    def test_a_named_search_keeps_its_own_row(self):
+        searches = {}
+        _tally(searches, _lead("s9", "abogado", "elche"))["analysed"] += 1
+        _tally(searches, _lead("s8", "fontanero", "elche"))["analysed"] += 1
+        assert [row["label"] for row in searches.values()] == ["abogado en elche",
+                                                              "fontanero en elche"]
+
+    def test_a_lead_naming_no_search_falls_into_the_shared_row(self):
+        searches = {}
+        _tally(searches, {"id": "l1"})["failed"] += 1
+        _tally(searches, {"id": "l2"})["failed"] += 1
+        assert searches == {"": _search("", None, 0, failed=2)}
+
+
+# ── run_analysis_job ──────────────────────────────────────────────────────────
 
 _JOB = {"id": "1", "business_name": "Ejemplo SL", "website": "https://ejemplo.es",
         "phone": "965000000", "city": "Elche", "profession": "fontaneros"}
 
 
-class TestRenderAccounting:
-    """The count of leads that needed a browser is what sizes the host."""
+class TestAnalysedOrFailed:
+    """What the closing block counts: a lead reported, or a lead given up on."""
 
     def _run(self, analysis: dict) -> bool:
         with patch("worker.analyze", return_value=analysis), \
@@ -266,19 +378,24 @@ class TestRenderAccounting:
              patch("worker.report_analysis"):
             return run_analysis_job(dict(_JOB))
 
-    def test_reports_a_lead_that_needed_a_browser(self):
-        assert self._run({"cms": "wordpress", "seo_score": 60, "compliance_rendered": True}) is True
+    def test_a_reported_lead_counts_as_analysed(self):
+        assert self._run({"cms": "wordpress", "seo_score": 60}) is True
 
-    def test_reports_a_lead_that_did_not(self):
-        assert self._run({"cms": "wordpress", "seo_score": 60}) is False
+    def test_an_unreachable_site_is_still_analysed(self):
+        # It has a phone, so it is pitched on the site being down — the strongest
+        # opening the agent gets, and not a failure.
+        assert self._run({"cms": "unreachable"}) is True
 
-    def test_an_unreachable_site_still_reports_its_browser_use(self):
-        assert self._run({"cms": "unreachable", "compliance_rendered": True}) is True
-
-    def test_a_failed_analysis_counts_no_browser(self):
+    def test_a_lead_nothing_could_be_read_from_counts_as_failed(self):
         with patch("worker.analyze", side_effect=RuntimeError("boom")), \
              patch("worker.report_analysis"):
             assert run_analysis_job(dict(_JOB)) is False
+
+    def test_an_unreachable_site_with_no_contact_channel_counts_as_failed(self):
+        with patch("worker.analyze", return_value={"cms": "unreachable"}), \
+             patch("worker.report_analysis") as report:
+            assert run_analysis_job({**_JOB, "phone": "", "email": ""}) is False
+        report.assert_called_once_with("1", {"failed": True})
 
 
 # ── Handing a claimed job back ────────────────────────────────────────────────
@@ -330,6 +447,26 @@ class TestReleaseOnInterrupt:
 
         payment_error.assert_called_once_with("s1")
         release.assert_called_once_with("1")
+
+    def test_a_429_releases_the_lead_without_warning_the_search(self):
+        # OpenRouter's rate limit, raised once the generator's own retries gave up. It
+        # says nothing about the lead and nothing about the account, so the lead goes
+        # back to the queue and the search is left alone. Answered as an ordinary HTTP
+        # error it was reported `failed: True`, retiring a lead over a limit that had
+        # lifted a minute later.
+        response = requests.Response()
+        response.status_code = 429
+
+        with patch("worker.analyze", side_effect=requests.HTTPError(response=response)), \
+             patch("worker.report_payment_error") as payment_error, \
+             patch("worker.report_analysis") as report, \
+             patch("worker.release_analysis_job") as release:
+            with pytest.raises(requests.HTTPError):
+                run_analysis_job({**_JOB, "lead_search_id": "s1"})
+
+        release.assert_called_once_with("1")
+        payment_error.assert_not_called()
+        report.assert_not_called()
 
     def test_an_ordinary_failure_still_fails_the_lead_instead_of_releasing_it(self):
         # The distinction the release is for: a lead whose site cannot be analysed has
@@ -410,6 +547,8 @@ class TestReportRejected:
              patch("worker.generate", return_value={"phone_script": "Argumentario"}), \
              patch("worker.report_analysis", side_effect=ReportRejected(response=response)) as report, \
              patch("worker.release_analysis_job") as release:
+            # Counted as a failure of the run, though the lead itself is left alone:
+            # the operator needs the closing block to say something went wrong.
             assert run_analysis_job(dict(_JOB)) is False
 
         # Reported once — the rejected payload — and never again with failed: True.
@@ -417,16 +556,6 @@ class TestReportRejected:
         # And not released: the refund would have the re-claim refused identically, burning
         # an LLM call per round for ever. Stale-claim recovery and the attempt ceiling bound it.
         release.assert_not_called()
-
-    def test_a_refused_report_still_counts_the_browser_it_used(self):
-        response = requests.Response()
-        response.status_code = 422
-
-        with patch("worker.analyze", return_value={"cms": "wordpress", "seo_score": 60,
-                                                  "compliance_rendered": True}), \
-             patch("worker.generate", return_value={"phone_script": "Argumentario"}), \
-             patch("worker.report_analysis", side_effect=ReportRejected(response=response)):
-            assert run_analysis_job(dict(_JOB)) is True
 
 
 # ── Asking whether a business is already in the system ────────────────────────
@@ -523,3 +652,305 @@ class TestSearchFailureVsInterruption:
 
         fail.assert_called_once()
         release.assert_not_called()
+
+
+# ── The order jobs are claimed in ─────────────────────────────────────────────
+
+class TestStartupLines:
+    def _start(self, is_tty: bool) -> str:
+        buf = io.StringIO()
+        buf.isatty = lambda: is_tty
+        with patch.object(sys, "stdout", buf), \
+             patch("worker.claim_next_analysis_job", return_value=None), \
+             patch("worker.claim_next_search_job", side_effect=KeyboardInterrupt), \
+             patch("worker.time.sleep"):
+            main()
+        return buf.getvalue()
+
+    def test_a_terminal_is_told_how_to_stop_the_worker(self):
+        assert "Ctrl+C to stop" in self._start(True)
+
+    def test_a_service_is_not_told_to_press_a_key(self):
+        # systemctl stop arrives as SIGTERM, which kills the process without the release
+        # Ctrl+C performs, so the advice would be wrong where nobody can follow it.
+        out = self._start(False)
+        assert "Ctrl+C" not in out
+        assert "Worker started" in out
+
+
+class TestJobOrder:
+    """A search is finished before the next is claimed.
+
+    The API already describes that order — pending, scraping, analyzing, completed —
+    and claiming searches first left two of them in `analyzing` at once, their leads
+    analysed as one indistinguishable stream.
+    """
+
+    def test_analyses_are_claimed_before_searches(self, capsys):
+        calls = []
+
+        def claim_analysis():
+            calls.append("analysis")
+            return None
+
+        def claim_search():
+            calls.append("search")
+            raise KeyboardInterrupt  # one pass is enough to see the order
+
+        with patch("worker.claim_next_analysis_job", side_effect=claim_analysis), \
+             patch("worker.claim_next_search_job", side_effect=claim_search), \
+             patch("worker.time.sleep"):
+            main()
+
+        assert calls == ["analysis", "search"]
+
+    def test_a_search_is_analysed_to_the_end_before_the_next_one_starts(self, capsys):
+        events = []
+        leads = {"s1": ["a1", "a2"], "s2": ["b1"]}
+        searches = iter([
+            {"id": "s1", "profession": "abogado", "city": "elche"},
+            {"id": "s2", "profession": "fontanero", "city": "elche"},
+        ])
+        queued: list[tuple[str, str]] = []
+
+        def claim_search():
+            job = next(searches, None)
+            if job is None:
+                raise KeyboardInterrupt
+            return job
+
+        def run_search(job):
+            # The API queues a search's leads as the scrape reports them.
+            events.append(f"scrape:{job['id']}")
+            queued.extend((lead, job["id"]) for lead in leads[job["id"]])
+            return len(leads[job["id"]])
+
+        def claim_analysis():
+            if not queued:
+                return None
+            lead, search_id = queued.pop(0)
+            return {"id": lead, "lead_search_id": search_id, "business_name": lead}
+
+        def run_analysis(job, idx=0, total=0):
+            events.append(f"analyse:{job['id']}")
+            return True
+
+        with patch("worker.claim_next_analysis_job", side_effect=claim_analysis), \
+             patch("worker.claim_next_search_job", side_effect=claim_search), \
+             patch("worker.run_search_job", side_effect=run_search), \
+             patch("worker.run_analysis_job", side_effect=run_analysis), \
+             patch("worker.time.sleep"):
+            main()
+
+        assert events == ["scrape:s1", "analyse:a1", "analyse:a2", "scrape:s2", "analyse:b1"]
+
+        # And each search closes its own analyses, rather than one total covering both.
+        # The second line arrives on the way out: Ctrl+C is the normal way to stop a
+        # run, and discarding what it had got through left no record of it.
+        assert capsys.readouterr().out.count("[+] Analysis done: 2 analysed") == 1
+
+    def test_an_interrupted_run_still_reports_what_it_got_through(self, capsys):
+        searches = iter([{"id": "s1", "profession": "abogado", "city": "elche"}])
+        queued: list[str] = []
+
+        def run_search(job):
+            queued.extend(["a1", "a2", "a3"])
+            return 5
+
+        def claim_analysis():
+            if not queued:
+                return None  # the first pass, before the search has been scraped
+            lead = queued.pop(0)
+            if lead == "a3":
+                raise KeyboardInterrupt  # stopped mid-run, two leads in
+            return {"id": lead, "lead_search_id": "s1", "business_name": lead,
+                    "profession": "abogado", "city": "elche"}
+
+        with patch("worker.claim_next_analysis_job", side_effect=claim_analysis), \
+             patch("worker.claim_next_search_job", side_effect=lambda: next(searches, None)), \
+             patch("worker.run_search_job", side_effect=run_search), \
+             patch("worker.run_analysis_job", return_value=True), \
+             patch("worker.time.sleep"):
+            main()
+
+        out = capsys.readouterr().out
+        assert "[+] Analysis done: 2 analysed" in out
+        assert "[+] Worker stopped" in out
+
+
+# ── Separators ────────────────────────────────────────────────────────────────
+
+class TestSeparators:
+    """A rule heads each block of work, so one search's lines tell from the next's."""
+
+    def _run(self, is_tty: bool = True) -> list[str]:
+        searches = iter([{"id": "s1", "profession": "abogado", "city": "elche"},
+                         {"id": "s2", "profession": "fontanero", "city": "elche"}])
+        queued: list[str] = []
+
+        def claim_search():
+            job = next(searches, None)
+            if job is None:
+                raise KeyboardInterrupt
+            return job
+
+        def run_search(job):
+            # Stands in for the real one, which is what prints the search header.
+            print(f"[>] Search: {job['profession']} en {job['city']}")
+            queued.append(job["id"])
+            return 1
+
+        def claim_analysis():
+            if not queued:
+                return None
+            search_id = queued.pop(0)
+            return {"id": "l1", "lead_search_id": search_id, "business_name": "Ejemplo SL",
+                    "profession": "abogado", "city": "elche"}
+
+        buf = io.StringIO()
+        buf.isatty = lambda: is_tty
+        with patch.object(sys, "stdout", buf), \
+             patch("worker.claim_next_analysis_job", side_effect=claim_analysis), \
+             patch("worker.claim_next_search_job", side_effect=claim_search), \
+             patch("worker.run_search_job", side_effect=run_search), \
+             patch("worker.run_analysis_job", return_value=True), \
+             patch("worker.time.sleep"):
+            main()
+        return buf.getvalue().replace("\r", "\n").splitlines()
+
+    def test_every_search_is_headed_by_one(self):
+        assert self._run().count(_RULE) == 2
+
+    def test_it_comes_before_the_search_rather_than_after_it(self):
+        lines = [line.strip() for line in self._run() if line.strip()]
+        rule = lines.index(_RULE)
+        assert lines[rule + 1].startswith("[>] Search")
+
+    def test_a_piped_run_gets_them_too(self):
+        # A run sent to a file is read the same way, and there the rule is the only
+        # thing separating one search's lines from the next's.
+        assert self._run(is_tty=False).count(_RULE) == 2
+
+    def test_leads_left_by_an_earlier_run_are_headed_too(self):
+        # They arrive before any search is claimed, so no search line heads them.
+        jobs = iter([{"id": "l1", "lead_search_id": "s9", "business_name": "Ejemplo SL",
+                      "profession": "abogado", "city": "elche"}])
+
+        def claim_analysis():
+            job = next(jobs, None)
+            if job is None:
+                raise KeyboardInterrupt
+            return job
+
+        buf = io.StringIO()
+        buf.isatty = lambda: True
+        with patch.object(sys, "stdout", buf), \
+             patch("worker.claim_next_analysis_job", side_effect=claim_analysis), \
+             patch("worker.claim_next_search_job", return_value=None), \
+             patch("worker.run_analysis_job", return_value=True), \
+             patch("worker.time.sleep"):
+            main()
+
+        assert _RULE in buf.getvalue()
+
+
+# ── Waiting out a limit ───────────────────────────────────────────────────────
+
+class TestRateLimitPause:
+    def _loop_once(self, status: int) -> list[int]:
+        """Run one pass whose analysis raises `status`, returning the sleeps taken."""
+        response = requests.Response()
+        response.status_code = status
+        slept: list[int] = []
+        raised = []
+
+        def claim_analysis():
+            if raised:
+                raise KeyboardInterrupt
+            raised.append(True)
+            return {"id": "l1", "lead_search_id": "s1", "business_name": "Ejemplo SL",
+                    "profession": "abogado", "city": "elche"}
+
+        with patch("worker.claim_next_analysis_job", side_effect=claim_analysis), \
+             patch("worker.claim_next_search_job", return_value=None), \
+             patch("worker.run_analysis_job", side_effect=requests.HTTPError(response=response)), \
+             patch("worker.time.sleep", side_effect=slept.append), \
+             patch("sys.stdout"):
+            main()
+        return slept
+
+    def test_a_rate_limit_pauses_a_minute_and_carries_on(self):
+        assert _RATE_LIMIT_PAUSE in self._loop_once(429)
+
+    def test_a_payment_error_waits_longer(self):
+        # Topping up an account is manual; a rate limit lifts on its own.
+        assert _PAYMENT_PAUSE in self._loop_once(402)
+        assert _PAYMENT_PAUSE > _RATE_LIMIT_PAUSE
+
+
+class TestCtrlCIsNeverATraceback:
+    """Every point the loop waits at, which is where an interrupt actually lands."""
+
+    def _stop_at(self, **patches) -> str:
+        defaults = {"worker.claim_next_analysis_job": {"return_value": None},
+                    "worker.claim_next_search_job": {"return_value": None},
+                    "worker.time.sleep": {"return_value": None}}
+        defaults.update(patches)
+        buf = io.StringIO()
+        buf.isatty = lambda: False
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "stdout", buf))
+            for target, kwargs in defaults.items():
+                stack.enter_context(patch(target, **kwargs))
+            main()  # must return rather than raise
+        return buf.getvalue()
+
+    def test_while_waiting_to_poll(self):
+        # Where an idle worker spends almost every second of its life, and where the
+        # polling sleep used to sit outside the handler.
+        assert "[+] Worker stopped" in self._stop_at(**{
+            "worker.time.sleep": {"side_effect": KeyboardInterrupt}})
+
+    def test_while_waiting_out_a_rate_limit(self):
+        response = requests.Response()
+        response.status_code = 429
+        out = self._stop_at(**{
+            "worker.claim_next_analysis_job": {"return_value": {"id": "l1", "business_name": "X"}},
+            "worker.run_analysis_job": {"side_effect": requests.HTTPError(response=response)},
+            "worker.time.sleep": {"side_effect": KeyboardInterrupt},
+        })
+        assert "[+] Worker stopped" in out
+
+    def test_while_analysing_a_lead(self):
+        out = self._stop_at(**{
+            "worker.claim_next_analysis_job": {"return_value": {
+                "id": "l1", "business_name": "X", "profession": "abogado", "city": "elche"}},
+            "worker.run_analysis_job": {"side_effect": KeyboardInterrupt},
+        })
+        assert "[+] Worker stopped" in out
+
+
+class TestLogsDoNotLandOnTheCounter:
+    def test_a_record_clears_the_in_place_line_first(self):
+        # The counter goes to stdout and logging to stderr, so on a terminal a warning
+        # arrived on the same row, spliced onto the lead being analysed.
+        buf = io.StringIO()
+        buf.isatty = lambda: True
+        handler = worker._ProgressAwareHandler(stream=io.StringIO())
+        record = logging.LogRecord("x", logging.WARNING, "f", 1, "rate limited", None, None)
+
+        with patch.object(sys, "stdout", buf):
+            handler.emit(record)
+
+        assert buf.getvalue() == f"\r{'':<{worker._LINE_WIDTH}}\r"
+
+    def test_nothing_is_written_when_there_is_no_counter_to_clear(self):
+        buf = io.StringIO()
+        buf.isatty = lambda: False
+        handler = worker._ProgressAwareHandler(stream=io.StringIO())
+        record = logging.LogRecord("x", logging.WARNING, "f", 1, "rate limited", None, None)
+
+        with patch.object(sys, "stdout", buf):
+            handler.emit(record)
+
+        assert buf.getvalue() == ""

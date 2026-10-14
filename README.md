@@ -75,6 +75,54 @@ Set `WORKER_ENV_FILE` to skip the question, which an unattended run must do.
 `.env.production` must be a full copy of `.env`, not just the changed lines: a
 terminal that already exported the local values keeps any variable it lacks.
 
+### Stopping it
+
+**Ctrl+C**, in the terminal it runs in. The job in hand is handed back to the queue —
+the search becomes claimable again at once and the lead keeps the attempt its claim
+charged — and what the run got through is still reported.
+
+`kill` is not the same thing. SIGTERM, which is also what `systemctl stop` sends, kills
+the process without that release, so the job it was holding stays claimed until the
+API's `scraper:recover-stale-jobs` clears it — up to `SCRAPER_CLAIM_TIMEOUT_MINUTES`
+(30 by default) later.
+
+**Each search is finished before the next one starts.** Analyses are claimed ahead of
+searches, so a search is scraped, analysed to the end and closed off — the lifecycle the
+API itself describes — rather than every search being scraped first and their leads
+analysed as one stream. The cost is that a queued search is not discovered until the one
+before it is done.
+
+Each search prints three lines, under a rule of its own. While its analyses run the
+third line is a bar rewritten in place with the lead in hand, replaced by the count when
+the queue empties:
+
+```
+──────────────────────────────────────────────────────────────────────────
+[>] Search: abogado en elche
+[+] Search done: 20 leads
+[>] Analysing [███████░░░░░] 12/20 — Pellicer & Heredia Abogados…
+[+] Analysis done: 20 analysed
+──────────────────────────────────────────────────────────────────────────
+[>] Search: abogado en aspe
+[+] Search done: 0 leads
+```
+
+If OpenRouter rate-limits the run, the lead in hand goes back to the queue and the
+worker says so and waits a minute — `[!] Rate limited — pausing for a minute` — rather
+than reporting a lead as failed over a limit that lifts on its own.
+
+A search that found nothing stops at two lines: there is nothing to analyse. A failed
+lead is named beside the count — `18 analysed, 2 failed` — and Ctrl+C still prints the
+count for what the run got through.
+
+Leads the API hands back from an earlier run, which is what a restart mid-analysis
+produces, have no Search line of this round to close: each is reported on its own line,
+titled after the search that found it (`[+] Analysis done — abogado en elche: 12
+analysed`), since nothing above it says which search that was.
+
+Outside a terminal the bar is dropped and the rest is printed as written: journald does
+not honour the carriage return the counter depends on.
+
 **Ctrl+C hands the job in hand back to the queue** (`release_search_job` /
 `release_analysis_job`), so the search is claimable again immediately and the lead keeps
 the attempt its claim charged. Without that the API only clears the claim through

@@ -42,6 +42,47 @@ logger = logging.getLogger(__name__)
 _SOCIAL_FIELDS = tuple(SOCIAL_DOMAINS.keys())
 
 
+# The progress line is rewritten in place, so every write pads to one width: a lead
+# with a short name following one with a long name would otherwise leave the tail of
+# the longer still on screen.
+_LINE_WIDTH = 74
+_BAR_WIDTH = 12
+_NAME_WIDTH = 30
+
+# Drawn with blocks where the stream can encode them. A daemon started under LANG=C
+# cannot, and a UnicodeEncodeError raised while printing the counter would be caught by
+# the analysis handler and reported to the API as a lead that failed to analyse.
+try:
+    "█░…─".encode(sys.stdout.encoding or "ascii")
+    _BAR_FULL, _BAR_EMPTY, _ELLIPSIS, _RULE_CHAR = "█", "░", "…", "─"
+except (UnicodeEncodeError, LookupError):
+    _BAR_FULL, _BAR_EMPTY, _ELLIPSIS, _RULE_CHAR = "#", "-", "..", "-"
+
+# Printed whether or not this is a terminal: a run piped to a file is read the same way,
+# and the rule is what makes one search's lines tell from the next's.
+_RULE = _RULE_CHAR * _LINE_WIDTH
+
+
+# How long the loop waits out a limit it cannot do anything about. The payment pause is
+# longer because topping up an account is manual; a rate limit lifts on its own.
+_PAYMENT_PAUSE = 120
+_RATE_LIMIT_PAUSE = 60
+
+
+class _ProgressAwareHandler(logging.StreamHandler):
+    """Clear the in-place counter before a log record lands on top of it.
+
+    Logging writes to stderr and the counter to stdout, so on a terminal a warning
+    arrived on the same row as the lead being analysed, starting at whatever column the
+    counter had padded to and leaving the two spliced together.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if sys.stdout.isatty():
+            print(f"\r{'':<{_LINE_WIDTH}}\r", end="", flush=True)
+        super().emit(record)
+
+
 def _progress(text: str) -> None:
     """Overwrite the current terminal line with a progress update.
 
@@ -51,12 +92,90 @@ def _progress(text: str) -> None:
     arrive as fragments glued onto whatever gets logged next.
     """
     if sys.stdout.isatty():
-        print(f"\r{text}", end="", flush=True)
+        print(f"\r{text:<{_LINE_WIDTH}}", end="", flush=True)
 
 
 def _finish(text: str) -> None:
-    """Print a final line, clearing the in-place counter it replaces on a terminal."""
-    print((f"\r{text}" + " " * 10) if sys.stdout.isatty() else text)
+    """Print a final line or block, clearing the in-place counter it replaces.
+
+    Only the first line is padded: it is the one that lands on top of the counter,
+    and the lines after it start on a row of their own.
+    """
+    first, newline, rest = text.partition("\n")
+    print(f"\r{first:<{_LINE_WIDTH}}{newline}{rest}" if sys.stdout.isatty() else text)
+
+
+# A lead whose search was not scraped in this round — left queued by an earlier run —
+# is counted apart: its total is unknown here, and attributing it to a search the
+# operator just launched would be a wrong answer rather than a missing one.
+_EARLIER = ""
+
+
+def _plural(count: int, singular: str, plural: str = "") -> str:
+    """Return the count with its noun agreeing: "1 lead", "4 leads"."""
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _tally(searches: dict, job: dict) -> dict:
+    """Return the row this lead's counts belong to, creating it when the search is new.
+
+    A search scraped in this round already has a row, with the leads it found. A lead the
+    API hands back from an earlier run — the normal case after the worker is restarted
+    mid-analysis, since analyses are claimed before searches — names its own search in
+    its payload, so it gets a row of its own titled after it and no lead count: this
+    worker never scraped it, and reporting a number there would be inventing one.
+    Only a lead that names no search at all falls into the shared row.
+    """
+    search_id = job.get("lead_search_id") or ""
+    if search_id in searches:
+        return searches[search_id]
+
+    profession, city = job.get("profession") or "", job.get("city") or ""
+    label = f"{profession} en {city}" if profession and city else profession or city
+    key = search_id if label else _EARLIER
+    return searches.setdefault(key, {"label": label, "found": None, "analysed": 0, "failed": 0})
+
+
+def _analysis_done_lines(searches: dict) -> str:
+    """Return the line that closes a run of analyses, under the search it belongs to.
+
+    One search per run is the normal case — its analyses finish before the next is
+    claimed — so this is one line, read as the third of the three a search prints.
+    A restart mid-analysis hands back leads from searches this run never headed with a
+    Search line, and then each is named: without the label its count would read as
+    belonging to whichever search came next.
+    """
+    named = len(searches) > 1
+    lines = []
+    for tally in searches.values():
+        counts = f"{tally['analysed']} analysed"
+        if tally["failed"]:
+            counts += f", {tally['failed']} failed"
+        label = tally["label"] or "from an earlier run"
+        lines.append(f"[+] Analysis done — {label}: {counts}" if named
+                     else f"[+] Analysis done: {counts}")
+    return "\n".join(lines)
+
+
+def _analysis_progress(idx: int, total: int, name: str) -> str:
+    """Return the in-place line for the lead being analysed.
+
+    The bar needs a denominator, and the analysis queue is global: a worker that starts
+    on leads left behind by an earlier run has no total, and one handed more leads than
+    the search it just scraped would run past the end of its own bar. Both fall back to
+    a bare counter rather than a wrong bar — and so does an unnumbered call, which must
+    never divide by its missing total: this line is printed from inside the analysis, so
+    an exception raised here would be reported to the API as a lead that failed.
+    """
+    if len(name) > _NAME_WIDTH:
+        name = name[:_NAME_WIDTH - len(_ELLIPSIS)] + _ELLIPSIS
+
+    if idx < 1 or total < idx:
+        return f"[>] Analysing{f' {idx}' if idx >= 1 else ''} — {name}"
+
+    filled = round(_BAR_WIDTH * idx / total)
+    bar = f"{_BAR_FULL * filled}{_BAR_EMPTY * (_BAR_WIDTH - filled)}"
+    return f"[>] Analysing [{bar}] {idx}/{total} — {name}"
 
 
 # What the API accepts per field, from IngestLeadsRequest and ReportLeadAnalysisRequest.
@@ -300,7 +419,7 @@ def run_search_job(job: dict) -> int:
                 batch = []
         total += _flush_batch(job["id"], batch)
         complete_search_job(job["id"], total)
-        print(f"[+] Search done: {total} leads")
+        print(f"[+] Search done: {_plural(total, 'lead')}")
     except KeyboardInterrupt:
         # KeyboardInterrupt is a BaseException, so it never reached the handler below and
         # the search stayed `scraping` until the API's stale-claim recovery noticed —
@@ -334,17 +453,20 @@ def run_search_job(job: dict) -> int:
     return total
 
 
-def run_analysis_job(job: dict, idx: int = 0) -> bool:
+def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
     """Analyze a single lead's website and generate its outreach message.
 
+    Args:
+        idx: Position of this lead in the run, for the progress counter.
+        total: Leads the run expects, or 0 when there is no way to know — see
+            ``_analysis_progress``.
+
     Returns:
-        Whether the compliance audit had to fall back to a browser. Counted by
-        the caller: a lead that renders costs a Chromium process, which is what
-        decides how much memory a host running this worker needs.
+        Whether the lead was analysed — False when it was reported as failed, so the
+        caller can count it against the search it came from. Counted there rather than
+        printed here, so a run of fifty leads still leaves one closing block.
     """
-    counter = f" {idx}" if idx else ""
-    _progress(f"[>] Analyzing{counter}")
-    rendered = False
+    _progress(_analysis_progress(idx, total, job["business_name"]))
     try:
         # profession drives the legal-notice checks that only apply to regulated
         # professions (bar association and membership number, LSSI art. 10.1.c).
@@ -353,8 +475,6 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
             "website": job["website"],
             "profession": job.get("profession", ""),
         })
-        rendered = bool(analysis.get("compliance_rendered"))
-
         cms = analysis.get("cms")
         # Read back as the ingest recorded it. The API serves it on GET /leads/next for
         # exactly this, and a lead ingested before it was reported carries NULL — which
@@ -370,10 +490,10 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
         if cms == "unreachable":
             if not (job.get("phone") or job.get("email")):
                 report_analysis(job["id"], {"failed": True})
-                return rendered
+                return False
             message = generate({**base_context, "has_website": True})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-            return rendered
+            return True
 
         if not job.get("website"):
             # Defensive, not reachable under the current API contract: a lead with no
@@ -385,10 +505,10 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
             # settles the lead so it stops holding its parent search open.
             if not (job.get("phone") or job.get("email")):
                 report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
-                return rendered
+                return True
             message = generate({**base_context, "has_website": False})
             report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-            return rendered
+            return True
 
         # has_website comes from the analysis, not the raw job: analyze() blanks
         # "website" when the URL is a social profile, because a Facebook page is not a
@@ -398,7 +518,7 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
         # no-website scenario is the correct framing and the actual sales angle.
         message = generate({**base_context, "has_website": bool(analysis.get("website"))})
         report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
-        return rendered
+        return True
     except KeyboardInterrupt:
         _finish("[!] Interrupted — releasing the lead")
         _release(release_analysis_job, job["id"], "lead")
@@ -416,15 +536,18 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
             "The API refused the analysis report for lead %s (%s); leaving the claim to expire",
             job["id"], job["business_name"],
         )
-        return rendered
+        return False
     except requests.HTTPError as e:
-        # 402 comes from OpenRouter, never from this API: the credit ran out mid-pitch.
-        # Nothing is wrong with the lead, so it goes back to the queue with its attempt
-        # refunded — otherwise a funding lapse spends all three and the API gives up on
-        # leads it never actually failed to analyse.
-        if e.response is not None and e.response.status_code == 402:
-            search_id = job.get("lead_search_id")
-            if search_id:
+        # Both of these come from OpenRouter rather than from this API, and neither says
+        # anything about the lead, so it goes back to the queue with its attempt refunded.
+        # 402 is the credit running out mid-pitch; 429 is its rate limit, raised only
+        # after the generator's own retries have given up. Answering 429 the way every
+        # other HTTP error is answered — `failed: True` — retired a lead for good over a
+        # limit that had lifted a minute later, and nothing afterwards can tell that from
+        # a site that genuinely could not be read.
+        status = e.response.status_code if e.response is not None else None
+        if status in (402, 429):
+            if status == 402 and (search_id := job.get("lead_search_id")):
                 try:
                     report_payment_error(search_id)
                 except Exception:
@@ -446,58 +569,100 @@ def run_analysis_job(job: dict, idx: int = 0) -> bool:
 
 
 def main() -> None:
-    """Poll the job queue forever, prioritizing search jobs over analysis jobs."""
+    """Poll the job queue forever, finishing each search before claiming the next.
+
+    Analyses are claimed first, so a search is scraped and then analysed to the end
+    before another is started. The API already describes that order — a search goes
+    pending, scraping, analyzing, completed — and claiming searches first left two of
+    them sitting in `analyzing` at once, their leads analysed as one indistinguishable
+    stream. The cost is that a second search waits for the first to finish rather than
+    being discovered early.
+    """
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[_ProgressAwareHandler()],
     )
     # Both printed on every start: the version to match a running worker to a release
     # when diagnosing a contract mismatch, and the target so an interactive run cannot
     # be scraping against development while its operator believes it is production.
     print(f"[+] Worker started (v{APP_VERSION}) — API: {API_BASE_URL}")
+    # Only on a terminal, and only for Ctrl+C: under a service manager the way to stop
+    # this is a stop command, which arrives as SIGTERM and kills the process outright —
+    # the claim it was holding then waits for the API's stale-claim recovery instead of
+    # being handed back. Printing the advice there would be printing the wrong advice.
+    if sys.stdout.isatty():
+        print("[i] Ctrl+C to stop — the job in hand is handed back to the queue")
     analysis_idx = 0
-    analysis_total = 0
-    rendered_count = 0
+    # Keyed by search id, so the closing block can name what each count belongs to;
+    # emptied once its line is printed. See _analysis_done_lines.
+    searches: dict[str, dict] = {}
     was_analyzing = False
 
-    def _done_line() -> str:
-        skipped = analysis_total - analysis_idx
-        note = f", {skipped} skipped" if skipped > 0 else ""
-        # Reported because it is the one cost that is not a request: each of these
-        # leads launched a Chromium process, which is what sizes the host.
-        browser = f", {rendered_count} needed a browser" if rendered_count else ""
-        return f"[+] Done ({analysis_idx} analyzed{note}{browser})"
-
-    while True:
-        try:
-            if job := claim_next_search_job():
+    try:
+        while True:
+            try:
+                if job := claim_next_analysis_job():
+                    # Leads left queued by an earlier run arrive before any search has been
+                    # claimed, so nothing has headed them: the rule is their only separator.
+                    if not was_analyzing and not searches:
+                        print(_RULE)
+                    analysis_idx += 1
+                    was_analyzing = True
+                    # The denominator for the bar: the leads this round is expected to carry.
+                    # Normally one search's own count, since its analyses finish before the
+                    # next is claimed; a leftover from an earlier run has none, which
+                    # _analysis_progress answers by dropping the bar.
+                    expected = sum(s["found"] for s in searches.values() if s["found"])
+                    tally = _tally(searches, job)
+                    if run_analysis_job(job, analysis_idx, expected):
+                        tally["analysed"] += 1
+                    else:
+                        tally["failed"] += 1
+                    continue
+                if job := claim_next_search_job():
+                    if was_analyzing:
+                        _finish(_analysis_done_lines(searches))
+                    # Reset whether or not anything was analysed: a search that found no
+                    # leads produces no analyses, and its row used to linger and be counted
+                    # under the next search's block.
+                    searches, analysis_idx, was_analyzing = {}, 0, False
+                    print(_RULE)
+                    searches[job["id"]] = {
+                        "label": f"{job['profession']} en {job['city']}",
+                        "found": run_search_job(job), "analysed": 0, "failed": 0,
+                    }
+                    continue
                 if was_analyzing:
-                    _finish(_done_line())
-                    was_analyzing = False
-                analysis_total = run_search_job(job)
-                analysis_idx = 0
-                rendered_count = 0
-                continue
-            if job := claim_next_analysis_job():
-                analysis_idx += 1
-                was_analyzing = True
-                rendered_count += run_analysis_job(job, analysis_idx)
-                continue
-            if was_analyzing:
-                _finish(_done_line())
-                was_analyzing = False
-        except KeyboardInterrupt:
-            # The job in hand, if any, has already released itself on the way out.
-            _finish("[+] Worker stopped")
-            return
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code == 402:
-                time.sleep(120)
-                continue
-            logger.error("API HTTP error in main loop: %s", e)
-        except requests.RequestException as e:
-            logger.warning("API connection error, retrying: %s", e)
-        time.sleep(POLL_INTERVAL + random.uniform(0, 2))
+                    _finish(_analysis_done_lines(searches))
+                    searches, analysis_idx, was_analyzing = {}, 0, False
+            except requests.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 402:
+                    time.sleep(_PAYMENT_PAUSE)
+                    continue
+                if status == 429:
+                    # The rate limit is reckoned per minute, so moving straight to the next
+                    # lead would spend it the same way. Said out loud because the run
+                    # otherwise goes quiet for a minute with nothing to explain it.
+                    _finish("[!] Rate limited — pausing for a minute")
+                    time.sleep(_RATE_LIMIT_PAUSE)
+                    continue
+                logger.error("API HTTP error in main loop: %s", e)
+            except requests.RequestException as e:
+                logger.warning("API connection error, retrying: %s", e)
+            time.sleep(POLL_INTERVAL + random.uniform(0, 2))
+    except KeyboardInterrupt:
+        # Caught around the whole loop rather than inside it: the polling sleep, and the
+        # longer ones a rate limit and a payment error wait out, all sat outside the old
+        # handler — and an idle worker spends almost every second of its life in one of
+        # them, so Ctrl+C answered with a traceback more often than not.
+        #
+        # The job in hand, if any, has already released itself on the way out. The counts
+        # of everything analysed before it are still worth printing: an interrupted run is
+        # the normal way to stop one, and discarding them left no record of what it did.
+        closing = f"{_analysis_done_lines(searches)}\n" if was_analyzing else ""
+        _finish(f"{closing}[+] Worker stopped")
 
 
 if __name__ == "__main__":
