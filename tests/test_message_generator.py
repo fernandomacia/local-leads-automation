@@ -1,10 +1,13 @@
 """Tests for ai/message_generator.py — pure parsing logic, no real API calls."""
 
+import json
 from unittest.mock import patch
 
 import pytest
 
 from ai.message_generator import (
+    SYSTEM_PROMPT,
+    _build_prompt,
     _dict_to_text,
     _escape_string_newlines,
     _parse,
@@ -138,3 +141,21 @@ class TestGenerate:
     def test_a_structured_script_is_flattened_to_text(self, _):
         script = generate({"lead": "Test", "has_website": True})["phone_script"]
         assert "--- Apertura ---" in script and "Buenos días" in script
+
+
+# ── What the model is told about the card ─────────────────────────────────────
+
+class TestMapsFindingsReachThePrompt:
+    def test_the_social_as_website_label_travels_in_the_maps_problems(self):
+        # The finding reaches the model as the label the panel shows, like every other
+        # Maps finding: nothing in the prompt names the key.
+        label = "La ficha de Google Maps enlaza a LinkedIn en lugar de a su web"
+        data = _build_prompt({"lead": "Nobelia Textil", "has_website": True,
+                              "maps_issues": {"social_as_website": label}})
+        assert label in json.loads(data)["problemas_google_maps"]
+
+    def test_the_system_prompt_tells_the_model_what_to_do_with_it(self):
+        # Without this the finding arrived as one more line of the Maps list and the
+        # pitch skipped it, which is how the incident went unsaid on the call.
+        assert "enlaza a una red social" in SYSTEM_PROMPT
+        assert "la propuesta es enlazar la ficha a su web" in SYSTEM_PROMPT

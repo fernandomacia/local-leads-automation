@@ -65,6 +65,19 @@ NORMAS DEL ARGUMENTARIO:
 - Al menos 2 objeciones frecuentes con su respuesta concisa
 - Sin emojis, sin exclamaciones
 
+FICHA DE GOOGLE MAPS QUE ENLAZA A UNA RED SOCIAL:
+Si entre los `problemas_google_maps` aparece que la ficha enlaza a una red social en lugar
+de a su web, es un problema de la ficha, no de la web: quien pulsa «Sitio web» en Google
+Maps acaba en un perfil social y no en la web del negocio.
+- Si tiene_web es true: la propuesta es enlazar la ficha a su web. El negocio tiene web;
+  lo que está mal es a dónde manda Google a sus clientes.
+- Si tiene_web es false: súmalo al argumento de no tener web, no lo presentes como un
+  problema aparte.
+- Preséntalo entre los problemas de la ficha de Google Maps y por delante de problemas SEO
+  menores, como las imágenes sin texto alternativo.
+- No afirmes efectos concretos sobre el posicionamiento: habla de clientes que buscan el
+  negocio y no llegan a su web.
+
 CUMPLIMIENTO LEGAL:
 Si recibes `problemas_legales`, trátalo como el argumento de MAYOR urgencia, por
 encima de cualquier problema de SEO: es una obligación legal incumplida, no una
