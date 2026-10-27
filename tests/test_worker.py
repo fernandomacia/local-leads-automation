@@ -50,6 +50,25 @@ class TestMapToApiShape:
         assert "website" not in result
         assert "phone" not in result
 
+    def test_the_cards_social_profile_is_sent(self):
+        payload = map_to_api_shape({
+            "lead": "Nobelia Textil", "website": "", "phone": "965000000",
+            "social_networks": {"linkedin": "https://es.linkedin.com/company/nobelia"},
+        })
+        assert payload["social_networks"] == {"linkedin": "https://es.linkedin.com/company/nobelia"}
+        assert "website" not in payload
+
+    def test_no_profile_on_the_card_omits_the_key_rather_than_sending_an_empty_object(self):
+        # The analysis writes this column too, from the links on the business's own
+        # site. {} would claim the card was read and found none, where NULL leaves the
+        # answer to the step that can still find one.
+        payload = map_to_api_shape({"lead": "Otro", "website": "https://ejemplo.es",
+                                    "social_networks": {}})
+        assert "social_networks" not in payload
+
+    def test_a_lead_scraped_before_the_card_carried_profiles_still_maps(self):
+        assert "social_networks" not in map_to_api_shape({"lead": "Otro"})
+
     def test_lead_key_mapped_to_business_name(self):
         result = map_to_api_shape({"lead": "Mi Empresa"})
         assert result["business_name"] == "Mi Empresa"
@@ -509,6 +528,12 @@ class TestFieldLimits:
 
     def test_a_long_business_name_is_cut(self):
         assert len(map_to_api_shape({"lead": "N" * 400})["business_name"]) == 255
+
+    def test_a_social_url_over_the_column_is_dropped_not_cut(self):
+        # Half a profile URL is not a shorter answer, it is one that goes nowhere — and
+        # one value over its column fails the whole ingest batch.
+        payload = map_to_api_shape({"lead": "X", "social_networks": {"linkedin": "https://x.es/" + "a" * 500}})
+        assert "social_networks" not in payload
 
     def test_a_long_pitch_is_cut(self):
         # Written by an LLM, so this is the normal case rather than an anomaly.

@@ -200,6 +200,7 @@ _FIELD_LIMITS: dict[str, tuple[int, bool]] = {
     "province":      (100,  True),
     "cms":           (50,   True),
     "email":         (255,  False),
+    "social_url":    (500,  False),
     "phone_script":  (5000, True),
     "found_url":     (2048, False),
     "method":        (20,   True),
@@ -259,6 +260,15 @@ def map_to_api_shape(lead: dict) -> dict:
         if value := lead.get(lead_key):
             if (value := _fit(api_key, value)) is not None:
                 payload[api_key] = value
+
+    # Sent only when the card carried a profile, unlike maps_issues below: the analysis
+    # writes this column too, from the links on the business's own site, so an empty
+    # object here would claim the card was read and found none where NULL leaves the
+    # answer to the step that can still find one.
+    if social := {platform: fitted
+                  for platform, url in (lead.get("social_networks") or {}).items()
+                  if (fitted := _fit("social_url", url)) is not None}:
+        payload["social_networks"] = social
 
     # Always sent, {} included: this is the only moment the Maps card is in front of us,
     # and the API accepts it here and nowhere else. {} says the card was complete; NULL
