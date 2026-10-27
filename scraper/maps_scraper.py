@@ -29,7 +29,9 @@ from config import (
     RETRY_BACKOFF_BASE,
     MAX_EXTRACTION_RETRIES,
     MAX_IDLE_SCROLLS,
+    SOCIAL_NAMES,
 )
+from scraper.social import identify_platform
 
 # Google Maps DOM hooks — centralized so a class-name change only needs one edit
 SELECTOR_RESULTS = "a.hfpxzc"
@@ -51,6 +53,20 @@ MAPS_ISSUES: dict[str, tuple[str, str]] = {
     "no_address": ("address", "Sin dirección en Google Maps"),
 }
 
+# The website button can be pointed at the wrong place rather than left empty, and then
+# it is this finding and never `no_website`: the business may well have a site. Nobelia
+# Textil did — its card sent anyone pressing "Sitio web" to LinkedIn, the card was
+# recorded as complete, and the strongest line the agent had went unsaid.
+#
+# Kept out of MAPS_ISSUES because its label names the network, which no missing field does.
+SOCIAL_AS_WEBSITE = "social_as_website"
+_SOCIAL_AS_WEBSITE_LABEL = "La ficha de Google Maps enlaza a {network} en lugar de a su web"
+
+
+def _card_platform(lead: dict) -> str | None:
+    """Return the network the card's website button pointed at, if it pointed at one."""
+    return next(iter(lead.get("social_networks") or {}), None)
+
 
 def maps_card_issues(lead: dict) -> dict[str, str]:
     """Return what this business's Google Maps card is missing.
@@ -65,8 +81,21 @@ def maps_card_issues(lead: dict) -> dict[str, str]:
     An empty dict is a real answer — the card is complete — and is what makes NULL on the
     API side mean "no worker has reported on this lead", so callers must send it as it
     comes rather than omitting it when empty.
+
+    ``no_website`` and ``social_as_website`` can never both appear: a button pointing at
+    a social profile is a wrong destination, not a missing one, and the business may have
+    a website all the same.
     """
-    return {key: label for key, (field, label) in MAPS_ISSUES.items() if not lead.get(field)}
+    issues = {}
+    for key, (field, label) in MAPS_ISSUES.items():
+        # Exclusive by construction rather than by the caller remembering the rule: the
+        # social profile replaces the missing-website finding, never joins it.
+        if key == "no_website" and (platform := _card_platform(lead)):
+            issues[SOCIAL_AS_WEBSITE] = _SOCIAL_AS_WEBSITE_LABEL.format(
+                network=SOCIAL_NAMES.get(platform, platform))
+        elif not lead.get(field):
+            issues[key] = label
+    return issues
 
 
 def _get_delay(base_delay: float) -> float:
@@ -146,7 +175,13 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
     name = page.locator(SELECTOR_NAME).inner_text()
 
     authority = page.locator(SELECTOR_WEBSITE)
-    website = canonical_website(authority.first.get_attribute("href")) if authority.count() > 0 else ""
+    href = authority.first.get_attribute("href") if authority.count() > 0 else ""
+    # A card whose website button is a social profile has no website here, and the
+    # profile is not one either: it is recorded as the network it is, and the mismatch
+    # becomes a finding of its own.
+    platform = identify_platform(href) if href else None
+    website = "" if platform else canonical_website(href)
+    social_networks = {platform: _social_profile(href)} if platform else {}
 
     phone_el = page.locator(SELECTOR_PHONE)
     phone = phone_el.first.get_attribute("href").replace("tel:", "") if phone_el.count() > 0 else ""
@@ -172,6 +207,7 @@ def _extract_business(page: Page, default_city: str = "") -> dict:
     return {
         "lead": name,
         "website": website or "",
+        "social_networks": social_networks,
         "phone": phone,
         "address": address,
         "zip_code": zip_code,
@@ -263,6 +299,18 @@ def canonical_website(href: str) -> str:
         return f"{root}/{'/'.join(segments)}" if segments else root
 
     return root
+
+
+def _social_profile(href: str) -> str:
+    """Return the profile URL as it should be recorded, tracking removed.
+
+    The path stays, unlike :func:`canonical_website`: on these cards the path *is* the
+    business — ``linkedin.com`` without it is the network's own homepage — and for a
+    business with no site of its own it is the only address anyone can be sent to.
+    """
+    parsed = urlparse(href.strip())
+    host = parsed.hostname + (f":{parsed.port}" if parsed.port else "") if parsed.hostname else ""
+    return f"{parsed.scheme}://{host}{parsed.path}".rstrip("/")
 
 
 def _to_ascii(host: str) -> str:

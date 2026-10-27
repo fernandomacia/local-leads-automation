@@ -9,8 +9,10 @@ from scraper.maps_scraper import (
     SELECTOR_NAME,
     SELECTOR_PHONE,
     SELECTOR_WEBSITE,
+    SOCIAL_AS_WEBSITE,
     _extract_business,
     _normalize_domain,
+    maps_card_issues,
     canonical_website,
     scrape_incrementally,
 )
@@ -269,3 +271,65 @@ class TestKnownBusinessesDoNotConsumeTheCap:
         assert [lead["lead"] for lead in _run_incrementally(
             cards, is_known=lambda d: True, max_results=1,
         )] == ["Sin web"]
+
+
+# ── A card whose website button is a social profile ───────────────────────────
+
+class TestSocialAsWebsite:
+    """Nobelia Textil: the card sent anyone pressing "Sitio web" to LinkedIn.
+
+    Recorded as a website, the profile was trimmed to the network's homepage, the card
+    read as complete, and the argumentario never mentioned that Google sends the
+    business's customers to LinkedIn instead of to its site.
+    """
+
+    def test_the_profile_is_recorded_as_a_network_and_not_as_a_website(self):
+        page = _make_page(website="https://es.linkedin.com/company/nobelia-textil?utm_source=Google")
+        lead = _extract_business(page, "Elche")
+        assert lead["website"] == ""
+        assert lead["social_networks"] == {"linkedin": "https://es.linkedin.com/company/nobelia-textil"}
+
+    def test_the_path_survives_because_it_is_the_business(self):
+        # canonical_website() would trim this to es.linkedin.com, which is the network's
+        # own homepage: for a business with no site of its own this is the only address
+        # anyone can be sent to.
+        page = _make_page(website="https://www.linkedin.com/company/nobelia#about")
+        assert _extract_business(page, "Elche")["social_networks"] == {
+            "linkedin": "https://www.linkedin.com/company/nobelia"}
+
+    def test_the_card_is_reported_as_pointing_at_the_network_by_name(self):
+        page = _make_page(website="https://es.linkedin.com/company/nobelia-textil?utm_source=Google")
+        issues = maps_card_issues(_extract_business(page, "Elche"))
+        assert issues[SOCIAL_AS_WEBSITE] == (
+            "La ficha de Google Maps enlaza a LinkedIn en lugar de a su web")
+
+    def test_it_is_never_reported_as_a_card_without_a_website(self):
+        # The business may well have one — Nobelia did, and an agent added it from the
+        # panel. Saying the card has no website would be a different, wrong claim.
+        page = _make_page(website="https://es.linkedin.com/company/nobelia-textil")
+        assert "no_website" not in maps_card_issues(_extract_business(page, "Elche"))
+
+    def test_an_x_profile_is_reported_under_twitter(self):
+        page = _make_page(website="https://x.com/negocio")
+        lead = _extract_business(page, "Elche")
+        assert lead["social_networks"] == {"twitter": "https://x.com/negocio"}
+        assert "X (Twitter)" in maps_card_issues(lead)[SOCIAL_AS_WEBSITE]
+
+    def test_a_card_with_no_link_at_all_is_still_a_card_without_a_website(self):
+        lead = _extract_business(_make_page(website=""), "Elche")
+        issues = maps_card_issues(lead)
+        assert lead["social_networks"] == {}
+        assert "no_website" in issues
+        assert SOCIAL_AS_WEBSITE not in issues
+
+    def test_a_real_website_is_left_alone(self):
+        lead = _extract_business(_make_page(website="https://www.nobeliatextil.es/es/inicio"), "Elche")
+        assert lead["website"] == "https://www.nobeliatextil.es"
+        assert lead["social_networks"] == {}
+        assert maps_card_issues(lead) == {}
+
+    def test_the_two_findings_cannot_both_appear(self):
+        # Exclusive by construction, so no caller has to remember the rule.
+        for website in ("", "https://es.linkedin.com/company/x", "https://x.es"):
+            issues = maps_card_issues(_extract_business(_make_page(website=website), "Elche"))
+            assert not {"no_website", SOCIAL_AS_WEBSITE} <= set(issues)
