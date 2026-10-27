@@ -142,6 +142,18 @@ class TestGenerate:
         script = generate({"lead": "Test", "has_website": True})["phone_script"]
         assert "--- Apertura ---" in script and "Buenos días" in script
 
+    @patch("ai.message_generator._complete", return_value=(
+        '{"phone_script": {"Objeciones": {'
+        '"Objeción 1": "No estoy seguro", "Respuesta": "Le explico por qué", '
+        '"Objeción 2": "Ya tenemos web", "Respuesta": "Es genial que la tenga"}}}'
+    ))
+    def test_repeated_labels_keep_every_answer(self, _):
+        # Verbatim shape from a production lead: a dict kept only the last "Respuesta",
+        # losing the first answer and pairing the second with the wrong objection.
+        script = generate({"lead": "Test", "has_website": True})["phone_script"]
+        assert "· Objeción 1: No estoy seguro — Respuesta: Le explico por qué" in script
+        assert "· Objeción 2: Ya tenemos web — Respuesta: Es genial que la tenga" in script
+
 
 # ── What the model is told about the card ─────────────────────────────────────
 

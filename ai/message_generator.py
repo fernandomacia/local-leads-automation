@@ -203,13 +203,33 @@ def _complete(user_prompt: str) -> str:
     return raw
 
 
+def _keep_repeated_keys(pairs: list) -> dict | list:
+    """Build a JSON object without losing values to repeated keys.
+
+    The model sometimes labels each line of a section instead of keying it by
+    content: "Objeción 1", "Respuesta", "Objeción 2", "Respuesta". A dict keeps
+    the last value of a repeated key in the first one's position, which silently
+    dropped the answer to the first objection and paired the second answer with it.
+
+    Repeated keys mean the keys are labels, so the entries are kept in order and
+    paired two by two as "label: text — label: text", the labelled shape the
+    panel already splits into the customer's line and ours.
+    """
+    keys = [k for k, _ in pairs]
+    if len(keys) == len(set(keys)):
+        return dict(pairs)
+    lines = [f"{k}: {v}" for k, v in pairs]
+    return [" — ".join(lines[i:i + 2]) for i in range(0, len(lines), 2)]
+
+
 def _try_load_json(s: str) -> dict | None:
     """Parse s as JSON, retrying after escaping literal newlines. Returns None on failure."""
     for candidate in (s, _escape_string_newlines(s)):
         try:
-            return json.loads(candidate)
+            result = json.loads(candidate, object_pairs_hook=_keep_repeated_keys)
         except json.JSONDecodeError:
-            pass
+            continue
+        return result if isinstance(result, dict) else None
     return None
 
 
