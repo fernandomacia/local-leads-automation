@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 from config import COMPLIANCE_RENDER_FALLBACK, COMPLIANCE_TIMEOUT, SOCIAL_DOMAINS
 from scraper.compliance import detect_compliance
 from scraper.net_guard import host_ok
+from scraper.social import identify_platform
 
 TIMEOUT = 15
 CONNECT_TIMEOUT = 12        # generous connect timeout — slow servers need it
@@ -176,15 +177,6 @@ def _render_fallback(url: str) -> str | None:
     return render(url)
 
 
-def _identify_platform(url: str) -> str | None:
-    """Return the social platform name if the URL belongs to one, else ``None``."""
-    host = urlparse(url).netloc.lower().removeprefix("www.")
-    for platform, domain in SOCIAL_DOMAINS.items():
-        if host == domain or host.endswith("." + domain):
-            return platform
-    return None
-
-
 def _detect_cms(html: str) -> str:
     """Return the CMS name detected in the HTML, or ``'unknown'`` if none matches."""
     for cms, signatures in CMS_SIGNATURES:
@@ -248,8 +240,8 @@ def _extract_socials(soup: BeautifulSoup) -> dict[str, str]:
     found = {p: "" for p in SOCIAL_DOMAINS}
     for link in soup.find_all("a", href=True):
         href = link["href"]
-        for platform, domain in SOCIAL_DOMAINS.items():
-            if not found[platform] and domain in href:
+        for platform, domains in SOCIAL_DOMAINS.items():
+            if not found[platform] and any(domain in href for domain in domains):
                 found[platform] = href
     return found
 
@@ -389,7 +381,7 @@ def analyze(lead: dict) -> dict:
     if not url:
         return {**lead, **_EMPTY_ANALYSIS}
 
-    platform = _identify_platform(url)
+    platform = identify_platform(url)
     if platform:
         return {**lead, "website": "", **_EMPTY_ANALYSIS, platform: url}
 

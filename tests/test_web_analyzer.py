@@ -13,8 +13,11 @@ import requests
 
 from bs4 import BeautifulSoup
 
+from config import SOCIAL_DOMAINS
+
 from scraper.web_analyzer import (
     MAX_RESPONSE_BYTES,
+    _extract_socials,
     _CONTACT_PATHS,
     _best_email,
     _extract_email,
@@ -241,3 +244,25 @@ class TestBestEmail:
 
     def test_empty_list_returns_empty(self):
         assert _best_email([], "miempresa.es") == ""
+
+
+# ── _extract_socials ──────────────────────────────────────────────────────────
+
+class TestExtractSocials:
+    def test_each_platform_takes_the_first_link_found(self):
+        html = ('<a href="https://instagram.com/uno">i</a>'
+                '<a href="https://instagram.com/dos">i2</a>'
+                '<a href="https://www.facebook.com/negocio">f</a>')
+        found = _extract_socials(BeautifulSoup(html, "html.parser"))
+        assert found["instagram"] == "https://instagram.com/uno"
+        assert found["facebook"] == "https://www.facebook.com/negocio"
+
+    def test_an_x_link_is_stored_under_twitter(self):
+        # One network under two domains, and only one column to store it in.
+        found = _extract_socials(BeautifulSoup('<a href="https://x.com/negocio">x</a>', "html.parser"))
+        assert found["twitter"] == "https://x.com/negocio"
+
+    def test_the_keys_are_platforms_even_when_nothing_is_found(self):
+        found = _extract_socials(BeautifulSoup("<p>nada</p>", "html.parser"))
+        assert set(found) == set(SOCIAL_DOMAINS)
+        assert set(found.values()) == {""}

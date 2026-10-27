@@ -30,7 +30,7 @@ load_dotenv(_ENV_FILE, override=True)
 # match. Kept here rather than in packaging metadata because the worker is run directly
 # (``python worker.py``) rather than installed, so this is the only place a running
 # process can read its own version from. Tagged v<APP_VERSION> at release time.
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.9.0"
 
 # ── API worker (SegurSEO-API job queue) ───────────────────────────────────────
 
@@ -57,14 +57,28 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 
 # ── Scraper ───────────────────────────────────────────────────────────────────
 
-# Maps platform name → root domain, used for detection and contact field naming
-SOCIAL_DOMAINS = {
-    "instagram": "instagram.com",
-    "facebook": "facebook.com",
-    "youtube": "youtube.com",
-    "linkedin": "linkedin.com",
-    "twitter": "twitter.com",
-    "tiktok": "tiktok.com",
+# Maps platform name → the domains it answers on, used for detection and contact field
+# naming. A tuple rather than one domain because a network can be reached under more
+# than one name: x.com and twitter.com are the same place, and a profile found under
+# either belongs under "twitter" — the key the API, the panel and this worker all store.
+# Keys are platforms, never domains: everything that reads this dict relies on that.
+SOCIAL_DOMAINS: dict[str, tuple[str, ...]] = {
+    "instagram": ("instagram.com",),
+    "facebook": ("facebook.com",),
+    "youtube": ("youtube.com",),
+    "linkedin": ("linkedin.com",),
+    "twitter": ("twitter.com", "x.com"),
+    "tiktok": ("tiktok.com",),
+}
+
+# What to call each network when a finding naming it is read out loud on a sales call.
+SOCIAL_NAMES: dict[str, str] = {
+    "instagram": "Instagram",
+    "facebook": "Facebook",
+    "youtube": "YouTube",
+    "linkedin": "LinkedIn",
+    "twitter": "X (Twitter)",
+    "tiktok": "TikTok",
 }
 
 # Delays (seconds) between browser actions to avoid bot detection
