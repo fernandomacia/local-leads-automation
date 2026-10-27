@@ -139,6 +139,19 @@ def analyze_website(url: str) -> dict:
   reduces it at extraction, so what is stored, audited and shown are the same thing.
   The exception is `_PATH_HOSTED_SITES`: on `wixsite.com` or `sites.google.com` the path
   *is* the customer's site, and trimming it would audit the builder's own homepage
+- **A social profile in the website button is not a website.** Nobelia Textil's card
+  linked LinkedIn; `canonical_website()` trimmed it to `es.linkedin.com`, it was stored
+  as the website, and `maps_card_issues()` called the card complete — so the argumentario
+  never said that Google sends the business's customers to LinkedIn instead of to its
+  site, which is a first-rate line on the call. `_extract_business()` now routes it to
+  `social_networks` with its path intact, leaves `website` empty, and reports
+  `social_as_website`. That key and `no_website` are produced by one branch each, so a
+  card can never carry both: the business may well have a site, and Nobelia did
+- **The API keeps its own list of these hosts in `Domain::isShared()`, and the two must
+  agree.** It needs them to stop deduplicating every business on a shared host into one,
+  and this worker needs them to stop recording one as a website. `wixsite.com` is
+  deliberately only on this side: there the *subdomain* names the business, so it is a
+  perfectly good key for the API and nulling it would merge every free Wix site in Spain
 - `MAX_IDLE_SCROLLS` bounds `scrape_incrementally()`: it stops after that many
   consecutive scroll waves with no new hrefs at all (end of feed), so an
   exhausted search doesn't scroll forever. Known (skipped) leads reset the

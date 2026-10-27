@@ -30,8 +30,10 @@ worker's and as "email or any social network", and it was neither.
 
 - Python 3.13+
 - OpenRouter API key (for message generation)
-- SegurSEO-API ≥ 4.0.0, with a worker token issued for that environment
-  (see the Compatibility table in `SegurSEO-API/README.md`)
+- SegurSEO-API ≥ 13.3.0, with a worker token issued for that environment
+  (see the Compatibility table in `SegurSEO-API/README.md`). 13.3.0 is what treats a
+  shared host as no domain at all and accepts `social_networks` on the ingest, which is
+  how a card pointing at a social profile is reported rather than deduplicated by it
 
 ---
 
