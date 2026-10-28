@@ -24,6 +24,13 @@ if _NAMED_ENV_FILE and not _ENV_FILE.is_file():
     raise EnvironmentError(f"WORKER_ENV_FILE points at {_ENV_FILE}, which is not a file")
 load_dotenv(_ENV_FILE, override=True)
 
+# Which of the two environments a run belongs to, for the audit store's `runs.environment`
+# — its CHECK accepts exactly these two values. Read from the file that was actually
+# loaded rather than from a variable inside it: the file is the choice the operator made
+# at startup, and a .env.production still holding a local URL is a mistake to see in the
+# audit, not one to relabel as local.
+ENVIRONMENT = "production" if _ENV_FILE.name == ".env.production" else "local"
+
 # The worker's own version, tracked independently of the API's and the theme's — each
 # project versions on its own cycle, and this is simply the analogous place to keep it
 # (composer.json there, style.css in the theme). The three numbers are not meant to
@@ -54,6 +61,14 @@ if not API_BASE_URL.startswith("https://") and (
     )
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
+
+# ── Audit store (Neon Postgres) ───────────────────────────────────────────────
+
+# Optional, and deliberately outside the guards above: empty means the worker records
+# everything in its local outbox and uploads none of it, which is a working configuration
+# and the one a fresh checkout has. The audit must never be the reason a worker refuses to
+# start — nor the reason it stops, which is why nothing in `audit/` raises at the caller.
+AUDIT_DATABASE_URL = os.getenv("AUDIT_DATABASE_URL", "")
 
 # ── Scraper ───────────────────────────────────────────────────────────────────
 
