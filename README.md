@@ -30,10 +30,17 @@ worker's and as "email or any social network", and it was neither.
 
 - Python 3.13+
 - OpenRouter API key (for message generation)
-- SegurSEO-API ≥ 13.3.0, with a worker token issued for that environment
-  (see the Compatibility table in `SegurSEO-API/README.md`). 13.3.0 is what treats a
-  shared host as no domain at all and accepts `social_networks` on the ingest, which is
-  how a card pointing at a social profile is reported rather than deduplicated by it
+- SegurSEO-API, with a worker token issued for that environment. Which versions go
+  together is recorded in the Compatibility table in `SegurSEO-API/README.md`, keyed to
+  `APP_VERSION`, and it names no version below which this worker refuses to run: every
+  pair it lists for the worker turns a feature off rather than stopping the run
+- **13.3.0 is the pair for this worker, and a soft one.** Against 13.2.x nothing fails and
+  no host is taken for a domain — the empty `website` deduplicates the lead by name on
+  either version, and `social_as_website` is stored, since `maps_issues` has carried its
+  keys through unvalidated since 3.0.0. What goes dark is the social profile:
+  `social_networks` has no rule at ingest before 13.3.0, so it is dropped, and for a
+  business with no site of its own the analysis has no page to read the profile from
+  either — the only address that business has reaches nobody
 
 ---
 
@@ -279,6 +286,7 @@ other.
 | `no_website` | The Maps listing has no website |
 | `no_phone` | The Maps listing has no phone number |
 | `no_address` | The Maps listing has no street address |
+| `social_as_website` | The listing's website button points at a social profile instead of at a site of the business's own. Its label names the network — "La ficha de Google Maps enlaza a LinkedIn en lugar de a su web" — and it **replaces `no_website`, never joins it**: the button is there and the destination is wrong, so the business may have a website all the same |
 
 ---
 
@@ -317,9 +325,10 @@ This worker is one of four components around the API, which is where the compati
 combinations are recorded — the Compatibility table in `SegurSEO-API/README.md`, keyed to
 `APP_VERSION`. Two things it says that matter here:
 
-- **Deploy the API first.** Every version of this worker has needed an API at least as new
-  as itself, and each of those API releases accepted the older input as well, so the gap is
-  short and one-sided in that direction only.
+- **Deploy the API first.** Up to 2.8.x every version of this worker needed an API at least
+  as new as itself; 2.9.0 is the first that degrades instead of requiring, and runs against
+  13.2.x with one feature dark. Either way those API releases accepted the older input too,
+  so the gap stays short and one-sided in that direction only.
 - **`APP_VERSION` is the contract**, not a label: it is what that table keys its
   requirements to, so a change to what this worker sends or reads bumps it.
 
