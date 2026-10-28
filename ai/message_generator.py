@@ -15,12 +15,28 @@ import time
 import requests
 
 from config import OPENROUTER_API_KEY, OPENROUTER_MODEL, SENDER_COMPANY, SOCIAL_DOMAINS
+from audit import recorder
 
 logger = logging.getLogger(__name__)
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 4
+
+
+def _elapsed_ms(since: float) -> int:
+    """Milliseconds since a monotonic mark — the clock cannot step mid-call."""
+    return round((time.monotonic() - since) * 1000)
+
+
+def _attempt(status: int | None, started: float) -> dict:
+    """One entry of the audited attempts list.
+
+    ``status`` is None when the request never came back at all, which is what tells a
+    timeout from a refusal afterwards. ``retry_in_s`` is filled in by the caller, and only
+    when a wait actually follows, so the last attempt of a call carries null.
+    """
+    return {"status": status, "latency_ms": _elapsed_ms(started), "retry_in_s": None}
 
 
 def _retry_delay(resp: requests.Response, attempt: int) -> float:
@@ -166,6 +182,12 @@ def _complete(user_prompt: str) -> str:
     Retries transient failures (rate limits, upstream 5xx) up to _MAX_ATTEMPTS
     times using server-hinted or exponential-backoff delays. 402 is never
     retried — it signals a billing issue handled upstream by the worker.
+
+    Audited from a ``finally``, so a call that timed out or was refused leaves the same
+    trace as one that answered: what was attempted, and how long each attempt took. The
+    headers are never handed to the recorder — the API key is in them — and nothing here
+    changes what is sent, including the fact that OpenRouter only returns a cost when the
+    request asks for one.
     """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -181,26 +203,57 @@ def _complete(user_prompt: str) -> str:
         "temperature": 0.6,
         "response_format": {"type": "json_object"},
     }
-    for attempt in range(_MAX_ATTEMPTS):
-        resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=(5, 90))
-        if resp.status_code not in _RETRYABLE_STATUSES or attempt == _MAX_ATTEMPTS - 1:
-            break
-        delay = _retry_delay(resp, attempt)
-        logger.warning(
-            "OpenRouter %s — retrying in %.1fs (attempt %d/%d)",
-            resp.status_code, delay, attempt + 1, _MAX_ATTEMPTS,
+    recorder.llm_call_started(
+        model=payload["model"], system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
+        temperature=payload["temperature"], max_tokens=payload["max_tokens"],
+    )
+    attempts: list[dict] = []
+    call_started = time.monotonic()
+    usage: dict = {}
+    response_raw = None
+    try:
+        for attempt in range(_MAX_ATTEMPTS):
+            attempt_started = time.monotonic()
+            try:
+                resp = requests.post(_OPENROUTER_URL, headers=headers, json=payload, timeout=(5, 90))
+            except Exception:
+                attempts.append(_attempt(None, attempt_started))
+                raise
+            attempts.append(_attempt(resp.status_code, attempt_started))
+            if resp.status_code not in _RETRYABLE_STATUSES or attempt == _MAX_ATTEMPTS - 1:
+                break
+            delay = _retry_delay(resp, attempt)
+            attempts[-1]["retry_in_s"] = delay
+            logger.warning(
+                "OpenRouter %s — retrying in %.1fs (attempt %d/%d)",
+                resp.status_code, delay, attempt + 1, _MAX_ATTEMPTS,
+            )
+            time.sleep(delay)
+        resp.raise_for_status()
+        body = resp.json()
+        if "error" in body:
+            raise ValueError(f"OpenRouter error: {body['error']}")
+        # Recorded as the model sent it, before the fences come off, and read only once
+        # the body has proved to be the shape this function expects: an exception raised
+        # in the finally below would replace the one the caller is meant to see.
+        response_raw = body["choices"][0]["message"]["content"]
+        usage = body.get("usage") or {}
+        raw = response_raw.strip()
+        # Strip markdown code fences — some models add them despite json_object mode
+        if raw.startswith("```"):
+            raw = re.sub(r'^```[a-z]*\n?', '', raw)
+            raw = re.sub(r'\n?```$', '', raw.rstrip()).strip()
+        return raw
+    finally:
+        recorder.llm_call_finished(
+            attempts=attempts,
+            final_status=attempts[-1]["status"] if attempts else None,
+            latency_ms=_elapsed_ms(call_started),
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            cost_usd=usage.get("cost"),
+            response_raw=response_raw,
         )
-        time.sleep(delay)
-    resp.raise_for_status()
-    body = resp.json()
-    if "error" in body:
-        raise ValueError(f"OpenRouter error: {body['error']}")
-    raw = body["choices"][0]["message"]["content"].strip()
-    # Strip markdown code fences — some models add them despite json_object mode
-    if raw.startswith("```"):
-        raw = re.sub(r'^```[a-z]*\n?', '', raw)
-        raw = re.sub(r'\n?```$', '', raw.rstrip()).strip()
-    return raw
 
 
 def _keep_repeated_keys(pairs: list) -> dict | list:
@@ -296,7 +349,13 @@ def generate(lead: dict) -> dict:
     try:
         phone_raw = _parse(raw).get("phone_script") or ""
         phone_text = _dict_to_text(phone_raw) if isinstance(phone_raw, dict) else str(phone_raw)
-        return {"phone_script": phone_text.replace("\\n", "\n").strip()}
+        result = {"phone_script": phone_text.replace("\\n", "\n").strip()}
+        recorder.llm_call_parsed(result, parsed_ok=True)
+        return result
     except (ValueError, KeyError) as exc:
         logger.exception("AI parse failed for '%s': %s — raw: %.200r", name, exc, raw)
-        return {"phone_script": ""}
+        # An answer that could not be used, not a call that failed: the tokens were spent
+        # and the lead is still reported, with a pitch the agent writes himself.
+        result = {"phone_script": ""}
+        recorder.llm_call_parsed(result, parsed_ok=False)
+        return result

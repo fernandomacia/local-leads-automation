@@ -28,6 +28,16 @@ worker requirements to.
 
 ### Added
 
+- **Every call to OpenRouter is recorded, with the prompt sent and the answer received in
+  full.** One row per call: the model, the temperature and the token ceiling actually sent,
+  one entry per HTTP attempt with its status, its latency and the wait applied after it,
+  the final status, the total latency and the tokens spent. Written from a `finally`, so a
+  call that timed out or was refused leaves the same trace as one that answered, and the
+  exception reaches the worker untouched — it is what decides whether the lead goes back
+  to the queue. The system prompt travels with its SHA-256, which outlives it: the text is
+  cleared after the retention window and the hash still answers which version of the
+  prompt produced a given pitch. Nothing is recorded outside an analysis, and the request
+  headers never reach the recorder, because the API key is in them.
 - **Local audit outbox (SQLite, per machine) for the shared audit store.** One file per
   machine, outside the repository. `put()` stores one fragment of an audit row — the columns
   known at that moment — and never raises: it is called from inside a search and an analysis,

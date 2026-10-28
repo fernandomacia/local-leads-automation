@@ -346,6 +346,18 @@ def analyze_website(url: str) -> dict:
 - **An outcome is recorded in a `finally`.** `run_search_job` and `run_analysis_job` both
   have exits that re-raise — Ctrl+C, a 402, a 429 — and a path that recorded nothing would
   read as work still in progress rather than work that ended.
+- **An OpenRouter call is audited from a `finally`**, so one that timed out or was refused
+  leaves the same trace as one that answered: every attempt with its status, its latency
+  and the wait that was actually applied after it. Nothing is recorded outside an analysis
+  — `llm_calls.analysis_id` is NOT NULL — and the headers never reach the recorder, which
+  has no parameter for them, because the API key is in them.
+- **`parsed_ok` is not the call's outcome.** A 200 whose JSON cannot be read has spent the
+  tokens and settles the lead with an empty pitch, and nothing downstream can tell that
+  from a model that was never reached. `final_status` says what the call did; `parsed_ok`
+  says what its answer was worth.
+- **`system_prompt_sha256` outlives the prompt it hashes**, which is why it is there: the
+  text is content and is cleared after 90 days, so the hash is what still answers which
+  version of the prompt produced a given pitch.
 - **The suite keeps its own audit local.** `conftest.py` points `AUDIT_OUTBOX_PATH` at
   `tmp_path` and blanks the DSN for every test: `main()` opens a run, so without that the
   tests wrote into the developer's own outbox and opened a connection to the real store.
