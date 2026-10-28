@@ -36,6 +36,7 @@ from api.client import (
     report_payment_error,
     report_analysis,
 )
+from audit import recorder
 
 logger = logging.getLogger(__name__)
 
@@ -413,32 +414,43 @@ def run_search_job(job: dict) -> int:
         so the figure is what the caller uses it for, an expectation of the analyses to come.
     """
     print(f"[>] Search: {job['profession']} en {job['city']}")
+    recorder.search_started(job)
     # Asked about every business the scraper extracts, so a known one never consumes a slot
     # of max_results — see _known_domain_check. It does not save the detail tab, which has
     # to be opened to learn the website the domain comes from.
     batch: list[dict] = []
     total = 0
+    seen = 0
+    reported = 0
+    # The outcome is recorded in a finally, so the path that re-raises is covered like the
+    # ones that return; anything that does not name its own outcome is a failure.
+    outcome, error = "failed", None
     try:
         for lead in scrape_incrementally(
             job["profession"], job["city"], headless=HEADLESS,
             is_known=_known_domain_check(), max_results=job["max_results"],
         ):
+            seen += 1
             batch.append(map_to_api_shape(lead))
             if len(batch) >= BATCH_SIZE:
                 total += _flush_batch(job["id"], batch)
+                reported += len(batch)
                 batch = []
         total += _flush_batch(job["id"], batch)
+        reported += len(batch)
         complete_search_job(job["id"], total)
+        outcome = "completed"
         print(f"[+] Search done: {_plural(total, 'lead')}")
     except KeyboardInterrupt:
         # KeyboardInterrupt is a BaseException, so it never reached the handler below and
         # the search stayed `scraping` until the API's stale-claim recovery noticed —
         # half an hour in which the operator who stopped the worker could not restart it
         # on the same search. Released and re-raised: stopping is what was asked for.
+        outcome = "released_interrupted"
         _finish("[!] Interrupted — releasing the search")
         _release(release_search_job, job["id"], "search")
         raise
-    except (requests.ConnectionError, requests.Timeout):
+    except (requests.ConnectionError, requests.Timeout) as e:
         # The API went out of reach, which says nothing about the search. Marking it failed
         # would retire a perfectly good job over a network blip — and doing so means calling
         # the same API that just could not be reached. Released instead, best effort: if that
@@ -448,6 +460,7 @@ def run_search_job(job: dict) -> int:
         # not would bounce the job for ever. It is throttled by its own cause: claiming a
         # search needs the API too, so while it is unreachable nothing re-runs, and each
         # round leaves a warning behind.
+        outcome, error = "released_api_unreachable", e
         logger.warning("Lost the API during search %s; releasing it", job["id"], exc_info=True)
         _release(release_search_job, job["id"], "search")
     except Exception as e:
@@ -455,11 +468,16 @@ def run_search_job(job: dict) -> int:
         # screen that changed, a payload the API refused. Failing the search is the point —
         # it carries the message to the panel, where somebody sees it. Bouncing it silently
         # instead would hide a broken scraper behind a queue that never empties.
+        error = e
         logger.exception("Search job %s failed", job["id"])
         try:
             fail_search_job(job["id"], str(e))
         except Exception:
             pass
+    finally:
+        recorder.search_finished(
+            outcome, cards_seen=seen, leads_reported=reported, leads_inserted=total, error=error,
+        )
     return total
 
 
@@ -477,6 +495,12 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
         printed here, so a run of fifty leads still leaves one closing block.
     """
     _progress(_analysis_progress(idx, total, job["business_name"]))
+    recorder.analysis_started(job)
+    # Recorded in a finally, so the three paths that re-raise are covered like the ones
+    # that return; anything that does not name its own outcome is a lead given up on.
+    # ``sent`` is assigned before the call it describes: on a refused report, the payload
+    # the API would not take is the one thing worth having afterwards.
+    outcome, error, sent = "failed", None, None
     try:
         # profession drives the legal-notice checks that only apply to regulated
         # professions (bar association and membership number, LSSI art. 10.1.c).
@@ -499,10 +523,13 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
 
         if cms == "unreachable":
             if not (job.get("phone") or job.get("email")):
-                report_analysis(job["id"], {"failed": True})
+                sent = {"failed": True}
+                report_analysis(job["id"], sent)
                 return False
             message = generate({**base_context, "has_website": True})
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            sent = map_analysis_to_api_shape(analysis, message)
+            report_analysis(job["id"], sent)
+            outcome = "analysed"
             return True
 
         if not job.get("website"):
@@ -514,10 +541,14 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
             # a pitch with no way to deliver it; reporting an empty message instead
             # settles the lead so it stops holding its parent search open.
             if not (job.get("phone") or job.get("email")):
-                report_analysis(job["id"], map_analysis_to_api_shape(analysis, {}))
+                sent = map_analysis_to_api_shape(analysis, {})
+                report_analysis(job["id"], sent)
+                outcome = "analysed"
                 return True
             message = generate({**base_context, "has_website": False})
-            report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+            sent = map_analysis_to_api_shape(analysis, message)
+            report_analysis(job["id"], sent)
+            outcome = "analysed"
             return True
 
         # has_website comes from the analysis, not the raw job: analyze() blanks
@@ -527,13 +558,16 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
         # of which there are none, since a social URL yields an empty analysis. The
         # no-website scenario is the correct framing and the actual sales angle.
         message = generate({**base_context, "has_website": bool(analysis.get("website"))})
-        report_analysis(job["id"], map_analysis_to_api_shape(analysis, message))
+        sent = map_analysis_to_api_shape(analysis, message)
+        report_analysis(job["id"], sent)
+        outcome = "analysed"
         return True
     except KeyboardInterrupt:
+        outcome = "released_interrupted"
         _finish("[!] Interrupted — releasing the lead")
         _release(release_analysis_job, job["id"], "lead")
         raise
-    except ReportRejected:
+    except ReportRejected as e:
         # Our payload is wrong; the lead is not. This used to answer {"failed": True},
         # which writes analysis_failed_at and retires a lead that was read perfectly well
         # — and nothing afterwards can tell that from a site that genuinely could not be.
@@ -542,6 +576,7 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
         # the re-claim would be refused identically, burning an LLM call per round for
         # ever; left alone, stale-claim recovery retries it and the three-attempt ceiling
         # retires it, with the refused fields in the log each time.
+        outcome, error = "report_rejected", e
         logger.exception(
             "The API refused the analysis report for lead %s (%s); leaving the claim to expire",
             job["id"], job["business_name"],
@@ -556,7 +591,9 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
         # limit that had lifted a minute later, and nothing afterwards can tell that from
         # a site that genuinely could not be read.
         status = e.response.status_code if e.response is not None else None
+        error = e
         if status in (402, 429):
+            outcome = "released_payment" if status == 402 else "released_rate_limit"
             if status == 402 and (search_id := job.get("lead_search_id")):
                 try:
                     report_payment_error(search_id)
@@ -565,17 +602,34 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
             _release(release_analysis_job, job["id"], "lead")
             raise
         logger.exception("Analysis job %s (%s) failed with HTTP error", job["id"], job["business_name"])
+        sent = {"failed": True}
         try:
-            report_analysis(job["id"], {"failed": True})
+            report_analysis(job["id"], sent)
         except Exception:
             pass
-    except Exception:
+    except Exception as e:
+        error = e
         logger.exception("Analysis job %s (%s) failed", job["id"], job["business_name"])
+        sent = {"failed": True}
         try:
-            report_analysis(job["id"], {"failed": True})
+            report_analysis(job["id"], sent)
         except Exception:
             pass
+    finally:
+        recorder.analysis_finished(outcome, error=error, result=sent)
     return False
+
+
+def _audit_stopped(end_reason: str) -> None:
+    """Close the audit run, and say what it could not upload before the worker went away.
+
+    Records left in the outbox are not lost — the next run drains them before it starts
+    on its own — but they are not in the store yet, and the line is what stops somebody
+    looking for a run that is still on this machine.
+    """
+    pending = recorder.stop(end_reason)
+    if pending > 0:
+        print(f"[i] {_plural(pending, 'audit record')} still local — they go up on the next run")
 
 
 def main() -> None:
@@ -603,6 +657,9 @@ def main() -> None:
     # being handed back. Printing the advice there would be printing the wrong advice.
     if sys.stdout.isatty():
         print("[i] Ctrl+C to stop — the job in hand is handed back to the queue")
+    # After the lines above, so the audit never delays what the operator is waiting to
+    # read, and after the env file has been chosen, which is what names the environment.
+    recorder.start()
     analysis_idx = 0
     # Keyed by search id, so the closing block can name what each count belongs to;
     # emptied once its line is printed. See _analysis_done_lines.
@@ -649,6 +706,7 @@ def main() -> None:
             except requests.HTTPError as e:
                 status = e.response.status_code if e.response is not None else None
                 if status == 402:
+                    recorder.pause(recorder.PAUSE_PAYMENT, _PAYMENT_PAUSE)
                     time.sleep(_PAYMENT_PAUSE)
                     continue
                 if status == 429:
@@ -656,11 +714,13 @@ def main() -> None:
                     # lead would spend it the same way. Said out loud because the run
                     # otherwise goes quiet for a minute with nothing to explain it.
                     _finish("[!] Rate limited — pausing for a minute")
+                    recorder.pause(recorder.PAUSE_RATE_LIMIT, _RATE_LIMIT_PAUSE)
                     time.sleep(_RATE_LIMIT_PAUSE)
                     continue
                 logger.error("API HTTP error in main loop: %s", e)
             except requests.RequestException as e:
                 logger.warning("API connection error, retrying: %s", e)
+            recorder.heartbeat()
             time.sleep(POLL_INTERVAL + random.uniform(0, 2))
     except KeyboardInterrupt:
         # Caught around the whole loop rather than inside it: the polling sleep, and the
@@ -673,6 +733,13 @@ def main() -> None:
         # the normal way to stop one, and discarding them left no record of what it did.
         closing = f"{_analysis_done_lines(searches)}\n" if was_analyzing else ""
         _finish(f"{closing}[+] Worker stopped")
+        _audit_stopped("stopped")
+    except Exception:
+        # The audit is closed on the way out rather than left to look like a run that
+        # died: a crash is a fact about this run, and it is the one the store cannot
+        # infer for itself. Re-raised untouched — the traceback is the point.
+        _audit_stopped("crashed")
+        raise
 
 
 if __name__ == "__main__":

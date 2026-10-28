@@ -14,9 +14,28 @@ os.environ.setdefault("OPENROUTER_API_KEY", "test-key")
 import pytest
 from bs4 import BeautifulSoup
 
+from audit import recorder
+
 
 def make_soup(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
+
+
+@pytest.fixture(autouse=True)
+def audit_stays_in_the_test(tmp_path, monkeypatch):
+    """Keep every test's audit in a temporary outbox and off the network.
+
+    ``worker.main()`` opens an audit run, so without this any test that reaches it wrote
+    into the developer's own outbox and opened a connection to the real Neon store — a
+    .env with AUDIT_DATABASE_URL set is the normal case, and load_dotenv(override=True)
+    means the suite reads it. The module state is restored after each test, so a run left
+    open by one cannot record into the next.
+    """
+    monkeypatch.setenv("AUDIT_OUTBOX_PATH", str(tmp_path / "outbox.sqlite"))
+    monkeypatch.setattr(recorder, "AUDIT_DATABASE_URL", "")
+    monkeypatch.setattr(recorder, "_outbox", None)
+    monkeypatch.setattr(recorder, "_syncer", None)
+    monkeypatch.setattr(recorder, "_run_id", None)
 
 
 @pytest.fixture

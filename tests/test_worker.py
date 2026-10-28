@@ -2,12 +2,14 @@
 
 import io
 import sys
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import DEFAULT, patch
 
 import pytest
 import requests
 
 from api.client import ReportRejected
+from audit import recorder
 from scraper.maps_scraper import maps_card_issues
 import logging
 from contextlib import ExitStack
@@ -979,3 +981,219 @@ class TestLogsDoNotLandOnTheCounter:
             handler.emit(record)
 
         assert buf.getvalue() == ""
+
+
+# ── What the audit records ────────────────────────────────────────────────────
+
+@pytest.fixture
+def audit():
+    """The recorder's functions as mocks, with its constants left real.
+
+    Patched one function at a time rather than as a whole module so a test can assert
+    against the real pause kinds, which is what the store's CHECK accepts.
+    """
+    with patch.multiple(
+        "worker.recorder",
+        start=DEFAULT, stop=DEFAULT, heartbeat=DEFAULT, pause=DEFAULT,
+        search_started=DEFAULT, search_finished=DEFAULT,
+        analysis_started=DEFAULT, analysis_finished=DEFAULT,
+    ) as mocks:
+        mocks["stop"].return_value = 0
+        yield SimpleNamespace(**mocks)
+
+
+class TestASearchRecordsHowItEnded:
+    """Every exit of run_search_job, including the one that re-raises.
+
+    The outcome is what the store is asked for first — "which searches did not finish,
+    and why" — so a path that forgot to record one would read as a search still running.
+    """
+
+    _SEARCH = {"id": "s1", "profession": "fontaneros", "city": "Elche", "max_results": None}
+
+    def _outcome(self, audit) -> str:
+        return audit.search_finished.call_args.args[0]
+
+    def test_a_finished_search_is_completed_and_counted(self, audit):
+        with patch("worker.scrape_incrementally", return_value=iter([{"lead": "A"}, {"lead": "B"}])), \
+             patch("worker.report_leads", return_value=2), \
+             patch("worker.complete_search_job"):
+            run_search_job(dict(self._SEARCH))
+
+        audit.search_started.assert_called_once()
+        assert self._outcome(audit) == "completed"
+        counts = audit.search_finished.call_args.kwargs
+        assert counts["cards_seen"] == 2
+        assert counts["leads_reported"] == 2
+        assert counts["leads_inserted"] == 2
+
+    def test_leads_reported_and_inserted_differ_when_the_api_deduplicates(self, audit):
+        # What the panel shows is the inserted figure; the gap between the two is the
+        # answer to "the scrape found plenty, why is the search almost empty".
+        with patch("worker.scrape_incrementally", return_value=iter([{"lead": "A"}, {"lead": "B"}])), \
+             patch("worker.report_leads", return_value=1), \
+             patch("worker.complete_search_job"):
+            run_search_job(dict(self._SEARCH))
+
+        counts = audit.search_finished.call_args.kwargs
+        assert counts["leads_reported"] == 2
+        assert counts["leads_inserted"] == 1
+
+    def test_a_broken_scrape_is_failed_with_its_error(self, audit):
+        with patch("worker.scrape_incrementally", side_effect=RuntimeError("selector gone")), \
+             patch("worker.fail_search_job"):
+            run_search_job(dict(self._SEARCH))
+
+        assert self._outcome(audit) == "failed"
+        assert isinstance(audit.search_finished.call_args.kwargs["error"], RuntimeError)
+
+    def test_losing_the_api_is_recorded_apart_from_a_failure(self, audit):
+        # The same distinction the release exists for: nothing about the search was wrong.
+        with patch("worker.scrape_incrementally", side_effect=requests.ConnectionError("down")), \
+             patch("worker.release_search_job"):
+            run_search_job(dict(self._SEARCH))
+
+        assert self._outcome(audit) == "released_api_unreachable"
+
+    def test_ctrl_c_is_recorded_on_the_way_out(self, audit):
+        with patch("worker.scrape_incrementally", side_effect=KeyboardInterrupt), \
+             patch("worker.release_search_job"):
+            with pytest.raises(KeyboardInterrupt):
+                run_search_job(dict(self._SEARCH))
+
+        assert self._outcome(audit) == "released_interrupted"
+
+
+class TestAnAnalysisRecordsHowItEnded:
+    """Every exit of run_analysis_job, including the three that re-raise."""
+
+    def _outcome(self, audit) -> str:
+        return audit.analysis_finished.call_args.args[0]
+
+    def _result(self, audit) -> dict:
+        return audit.analysis_finished.call_args.kwargs["result"]
+
+    def test_a_reported_lead_keeps_what_the_api_was_sent(self, audit):
+        with patch("worker.analyze", return_value={"cms": "wordpress", "seo_score": 60}), \
+             patch("worker.generate", return_value={"phone_script": "Argumentario"}), \
+             patch("worker.report_analysis"):
+            run_analysis_job(dict(_JOB))
+
+        audit.analysis_started.assert_called_once()
+        assert self._outcome(audit) == "analysed"
+        assert self._result(audit)["phone_script"] == "Argumentario"
+
+    def test_an_unreachable_site_with_no_contact_channel_is_a_failure(self, audit):
+        with patch("worker.analyze", return_value={"cms": "unreachable"}), \
+             patch("worker.report_analysis"):
+            run_analysis_job({**_JOB, "phone": "", "email": ""})
+
+        assert self._outcome(audit) == "failed"
+        assert self._result(audit) == {"failed": True}
+
+    def test_a_lead_nothing_could_be_read_from_is_failed_with_its_error(self, audit):
+        with patch("worker.analyze", side_effect=RuntimeError("boom")), \
+             patch("worker.report_analysis"):
+            run_analysis_job(dict(_JOB))
+
+        assert self._outcome(audit) == "failed"
+        assert isinstance(audit.analysis_finished.call_args.kwargs["error"], RuntimeError)
+
+    def test_a_refused_report_keeps_the_payload_it_refused(self, audit):
+        # The one case where the payload is the whole point: the lead was read perfectly
+        # well and the fields the API would not take are what somebody has to look at.
+        with patch("worker.analyze", return_value={"cms": "wordpress", "seo_score": 60}), \
+             patch("worker.generate", return_value={"phone_script": "Argumentario"}), \
+             patch("worker.report_analysis", side_effect=ReportRejected("422")):
+            run_analysis_job(dict(_JOB))
+
+        assert self._outcome(audit) == "report_rejected"
+        assert self._result(audit)["phone_script"] == "Argumentario"
+
+    @pytest.mark.parametrize("status, outcome", [
+        (402, "released_payment"),
+        (429, "released_rate_limit"),
+    ])
+    def test_a_limit_is_recorded_as_a_release(self, audit, status, outcome):
+        # Neither says anything about the lead, and the store has to agree with the queue:
+        # the attempt was refunded, so it must not read as an attempt the lead spent.
+        response = requests.Response()
+        response.status_code = status
+
+        with patch("worker.analyze", side_effect=requests.HTTPError(response=response)), \
+             patch("worker.report_payment_error"), \
+             patch("worker.release_analysis_job"):
+            with pytest.raises(requests.HTTPError):
+                run_analysis_job({**_JOB, "lead_search_id": "s1"})
+
+        assert self._outcome(audit) == outcome
+        assert self._result(audit) is None
+
+    def test_ctrl_c_is_recorded_on_the_way_out(self, audit):
+        with patch("worker.analyze", side_effect=KeyboardInterrupt), \
+             patch("worker.release_analysis_job"):
+            with pytest.raises(KeyboardInterrupt):
+                run_analysis_job(dict(_JOB))
+
+        assert self._outcome(audit) == "released_interrupted"
+
+
+class TestTheRunItself:
+    def _loop(self, audit, **patches) -> str:
+        defaults = {"worker.claim_next_analysis_job": {"return_value": None},
+                    "worker.claim_next_search_job": {"return_value": None},
+                    "worker.time.sleep": {"side_effect": KeyboardInterrupt}}
+        defaults.update(patches)
+        buf = io.StringIO()
+        buf.isatty = lambda: False
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "stdout", buf))
+            for target, kwargs in defaults.items():
+                stack.enter_context(patch(target, **kwargs))
+            main()
+        return buf.getvalue()
+
+    def test_the_run_is_opened_and_beats_while_it_waits(self, audit):
+        self._loop(audit)
+        audit.start.assert_called_once()
+        audit.heartbeat.assert_called()
+
+    def test_stopping_closes_the_run(self, audit):
+        self._loop(audit)
+        audit.stop.assert_called_once_with("stopped")
+
+    def test_records_left_behind_are_said_out_loud(self, audit):
+        # They are not lost — the next run drains them — but they are not in the store
+        # yet, which is what stops somebody looking for a run still on this machine.
+        audit.stop.return_value = 3
+        assert "3 audit records still local" in self._loop(audit)
+
+    def test_a_crash_closes_the_run_and_keeps_the_traceback(self, audit):
+        with pytest.raises(RuntimeError):
+            self._loop(audit, **{
+                "worker.claim_next_analysis_job": {"side_effect": RuntimeError("bug")}})
+
+        audit.stop.assert_called_once_with("crashed")
+
+    @pytest.mark.parametrize("status, kind, seconds", [
+        (402, recorder.PAUSE_PAYMENT, _PAYMENT_PAUSE),
+        (429, recorder.PAUSE_RATE_LIMIT, _RATE_LIMIT_PAUSE),
+    ])
+    def test_the_pauses_the_loop_takes_are_recorded(self, audit, status, kind, seconds):
+        response = requests.Response()
+        response.status_code = status
+        claimed = []
+
+        def claim_analysis():
+            if claimed:
+                raise KeyboardInterrupt
+            claimed.append(True)
+            return {"id": "l1", "lead_search_id": "s1", "business_name": "Ejemplo SL"}
+
+        self._loop(audit, **{
+            "worker.claim_next_analysis_job": {"side_effect": claim_analysis},
+            "worker.run_analysis_job": {"side_effect": requests.HTTPError(response=response)},
+            "worker.time.sleep": {"return_value": None},
+        })
+
+        audit.pause.assert_called_once_with(kind, seconds)

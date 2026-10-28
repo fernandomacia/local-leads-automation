@@ -39,9 +39,10 @@ ai/
 api/
   client.py                  # SegurSEO-API job-queue client: every call through one _request()
 audit/
-  migrations/                # SQL for the shared audit store (Neon Postgres)
+  recorder.py                # What the worker did, as domain events: runs, searches, analyses
   outbox.py                  # Local SQLite buffer of audit fragments; never raises on put()
   sync.py                    # Drains the outbox into Neon from a background thread
+  migrations/                # SQL for the shared audit store (Neon Postgres)
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
 env_select.py                # Asks which env file to load, before config.py reads one
 ```
@@ -301,6 +302,33 @@ def analyze_website(url: str) -> dict:
 - **The version is the contract.** `APP_VERSION` is what the API's Compatibility table
   keys its worker requirements to, so a change to what this worker sends or reads bumps
   it in the same commit.
+
+### Audit trail
+
+- **The audit never breaks the worker.** Every public function in `recorder` swallows its
+  own failures and `Outbox.put()` never raises: a lead reported as failed because its audit
+  row could not be written is a worse outcome than no audit at all. Failures are logged
+  under the `audit` hierarchy, which the log handler leaves out so a broken outbox cannot
+  feed on its own warnings.
+- **Three layers, one direction.** `recorder` turns what the worker did into rows, in the
+  worker's vocabulary — `worker.py` names no table and no column; `outbox` buffers them as
+  fragments in one SQLite file per machine; `sync` drains them into Neon from a background
+  thread. Without `AUDIT_DATABASE_URL` the first two work and the third never starts, which
+  is a working configuration and the one a fresh checkout has.
+- **Without `recorder.start()` every function is a no-op**, so the tests and any other entry
+  point are unaffected by the audit existing. `main()` is what starts it, after the env file
+  has been chosen: that file is what names `ENVIRONMENT`, which the store's CHECK accepts as
+  exactly `local` or `production`.
+- **The first fragment of a row is its INSERT**, so it carries every NOT NULL column of its
+  table, the ones with a default included; later fragments carry only what they add. One
+  missing is a row Neon refuses outright, so `tests/test_audit_recorder.py` checks the first
+  fragments against the migration itself rather than against a restated list.
+- **An outcome is recorded in a `finally`.** `run_search_job` and `run_analysis_job` both
+  have exits that re-raise — Ctrl+C, a 402, a 429 — and a path that recorded nothing would
+  read as work still in progress rather than work that ended.
+- **The suite keeps its own audit local.** `conftest.py` points `AUDIT_OUTBOX_PATH` at
+  `tmp_path` and blanks the DSN for every test: `main()` opens a run, so without that the
+  tests wrote into the developer's own outbox and opened a connection to the real store.
 
 ### Compliance auditing
 - Bias is asymmetric on purpose: a false positive is read out loud to a business

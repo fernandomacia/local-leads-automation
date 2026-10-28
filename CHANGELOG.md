@@ -29,3 +29,11 @@ worker requirements to.
   outage marks nothing and retries the batch after a growing pause; a refusal replays the
   batch one fragment at a time under savepoints, so the one fragment Neon will never take is
   set aside with its error instead of holding back every fragment written after it.
+- **The worker records what it did: runs, search attempts, analyses, and the pauses it waits
+  out.** A run says which machine and environment it ran on and whether it stopped or
+  crashed; a search attempt says how it ended and how many cards it saw against how many
+  leads were reported and how many the API actually inserted; an analysis says its outcome,
+  how long it took, the error that ended it and the payload the API was sent — which on a
+  refused report is the one thing worth having afterwards. `worker.py` names no table and no
+  column: it says a search was released because the API went out of reach, and `recorder`
+  decides what that is. The cards, the OpenRouter calls and the log handler come next.
