@@ -332,8 +332,8 @@ combinations are recorded — the Compatibility table in `SegurSEO-API/README.md
 - **`APP_VERSION` is the contract**, not a label: it is what that table keys its
   requirements to, so a change to what this worker sends or reads bumps it.
 
-Version history lives in the git tags (`v<APP_VERSION>`) and, in more detail than belongs
-here, in the project phases in `CLAUDE.md`.
+Version history lives in `CHANGELOG.md` and the git tags (`v<APP_VERSION>`) and, in more
+detail than belongs here, in the project phases in `CLAUDE.md`.
 
 ---
 

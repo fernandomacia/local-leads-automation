@@ -38,6 +38,9 @@ ai/
   message_generator.py       # Generates the phone argumentario via OpenRouter API
 api/
   client.py                  # SegurSEO-API job-queue client: every call through one _request()
+audit/
+  migrations/                # SQL for the shared audit store (Neon Postgres)
+  outbox.py                  # Local SQLite buffer of audit fragments; never raises on put()
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
 env_select.py                # Asks which env file to load, before config.py reads one
 ```
