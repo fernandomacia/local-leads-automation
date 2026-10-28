@@ -8,6 +8,10 @@ required columns, always reaches Neon before the later ones that complete it.
 SQLite suits this file and would not suit the shared store: here one process on one
 machine writes it, and nothing syncs the file itself.
 
+A fragment Neon refuses for good (a bad column, a value it cannot take) is marked failed
+with its error and left out of the queue, so one bad fragment cannot hold back every one
+written after it.
+
 put() never raises. The worker calls it from inside a search and an analysis, and an
 audit failure must never turn into a lead reported as failed. The read and bookkeeping
 methods may raise; their only caller is the sync thread, which handles it.
@@ -39,6 +43,8 @@ TARGETS = frozenset({
 
 # Synced records stay this long locally; they hold the same personal data as Neon.
 SYNCED_RETENTION_DAYS = 7
+# Failed ones stay longer: they are what someone will want to look at.
+FAILED_RETENTION_DAYS = 30
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS records (
@@ -47,9 +53,12 @@ CREATE TABLE IF NOT EXISTS records (
     record_id   TEXT    NOT NULL,
     fields      TEXT    NOT NULL,
     created_at  TEXT    NOT NULL,
-    synced_at   TEXT
+    synced_at   TEXT,
+    failed_at   TEXT,
+    error       TEXT
 );
-CREATE INDEX IF NOT EXISTS records_pending_idx ON records (seq) WHERE synced_at IS NULL;
+CREATE INDEX IF NOT EXISTS records_pending_idx ON records (seq)
+    WHERE synced_at IS NULL AND failed_at IS NULL;
 CREATE INDEX IF NOT EXISTS records_record_idx  ON records (target, record_id);
 """
 
@@ -137,7 +146,7 @@ class Outbox:
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT seq, target, record_id, fields FROM records "
-                "WHERE synced_at IS NULL ORDER BY seq LIMIT ?",
+                "WHERE synced_at IS NULL AND failed_at IS NULL ORDER BY seq LIMIT ?",
                 (limit,),
             ).fetchall()
         return [PendingRecord(seq, target, rid, json.loads(f)) for seq, target, rid, f in rows]
@@ -145,7 +154,16 @@ class Outbox:
     def pending_count(self) -> int:
         self._ensure_schema()
         with closing(self._connect()) as conn:
-            return conn.execute("SELECT count(*) FROM records WHERE synced_at IS NULL").fetchone()[0]
+            return conn.execute(
+                "SELECT count(*) FROM records WHERE synced_at IS NULL AND failed_at IS NULL"
+            ).fetchone()[0]
+
+    def failed_count(self) -> int:
+        self._ensure_schema()
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT count(*) FROM records WHERE failed_at IS NOT NULL"
+            ).fetchone()[0]
 
     def mark_synced(self, seqs: list[int]) -> None:
         if not seqs:
@@ -157,12 +175,29 @@ class Outbox:
                 "UPDATE records SET synced_at = ? WHERE seq = ?", [(stamp, s) for s in seqs],
             )
 
-    def prune(self, keep_days: int = SYNCED_RETENTION_DAYS) -> int:
-        """Delete fragments synced more than keep_days ago. Unsynced ones are never touched."""
+    def mark_failed(self, seq: int, error: str) -> None:
+        """Take a fragment Neon refused for good out of the queue, keeping why."""
         self._ensure_schema()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "UPDATE records SET failed_at = ?, error = ? WHERE seq = ?", (_now(), error, seq),
+            )
+
+    def prune(
+        self,
+        keep_days: int = SYNCED_RETENTION_DAYS,
+        keep_failed_days: int = FAILED_RETENTION_DAYS,
+    ) -> int:
+        """Delete old synced and old failed fragments. Pending ones are never touched."""
+        self._ensure_schema()
+        now = datetime.now(timezone.utc)
+        synced_cutoff = (now - timedelta(days=keep_days)).isoformat()
+        failed_cutoff = (now - timedelta(days=keep_failed_days)).isoformat()
         with closing(self._connect()) as conn, conn:
             cur = conn.execute(
-                "DELETE FROM records WHERE synced_at IS NOT NULL AND synced_at < ?", (cutoff,),
+                "DELETE FROM records "
+                "WHERE (synced_at IS NOT NULL AND synced_at < ?) "
+                "   OR (failed_at IS NOT NULL AND failed_at < ?)",
+                (synced_cutoff, failed_cutoff),
             )
             return cur.rowcount

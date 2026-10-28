@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -115,3 +115,40 @@ class TestDefaultPath:
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
         assert default_path() == tmp_path / "local-leads-automation" / "outbox.sqlite"
+
+
+class TestFailedFragments:
+    def test_a_failed_fragment_leaves_the_queue_and_keeps_its_error(self, outbox):
+        outbox.put("runs", "bad", {"machine": "debian"})
+        outbox.put("runs", "good", {"machine": "debian"})
+        bad = outbox.pending()[0]
+
+        outbox.mark_failed(bad.seq, "UndefinedColumn: machne")
+
+        assert [p.record_id for p in outbox.pending()] == ["good"]
+        assert outbox.pending_count() == 1
+        assert outbox.failed_count() == 1
+        with sqlite3.connect(outbox.path) as conn:
+            error = conn.execute("SELECT error FROM records WHERE seq = ?", (bad.seq,)).fetchone()[0]
+        assert error == "UndefinedColumn: machne"
+
+    def test_failed_fragments_outlive_synced_ones(self, outbox):
+        for rid in ("synced-20d", "failed-20d", "failed-40d"):
+            outbox.put("runs", rid, {"machine": "debian"})
+        seqs = {p.record_id: p.seq for p in outbox.pending()}
+        outbox.mark_synced([seqs["synced-20d"]])
+        outbox.mark_failed(seqs["failed-20d"], "x")
+        outbox.mark_failed(seqs["failed-40d"], "x")
+
+        twenty = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+        forty = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+        with sqlite3.connect(outbox.path) as conn:
+            conn.execute("UPDATE records SET synced_at = ? WHERE record_id = 'synced-20d'", (twenty,))
+            conn.execute("UPDATE records SET failed_at = ? WHERE record_id = 'failed-20d'", (twenty,))
+            conn.execute("UPDATE records SET failed_at = ? WHERE record_id = 'failed-40d'", (forty,))
+
+        assert outbox.prune() == 2
+
+        with sqlite3.connect(outbox.path) as conn:
+            left = {r[0] for r in conn.execute("SELECT record_id FROM records")}
+        assert left == {"failed-20d"}
