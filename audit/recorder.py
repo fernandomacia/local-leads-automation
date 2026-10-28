@@ -17,6 +17,7 @@ Without start() every function is a no-op, so the tests and any other entry poin
 unaffected by the audit existing at all.
 """
 
+import hashlib
 import logging
 import socket
 import time
@@ -62,6 +63,7 @@ _last_heartbeat = 0.0
 _search_attempt_id: ContextVar[str | None] = ContextVar("audit_search_attempt", default=None)
 _analysis_id: ContextVar[str | None] = ContextVar("audit_analysis", default=None)
 _analysis_clock: ContextVar[float | None] = ContextVar("audit_analysis_clock", default=None)
+_llm_call_id: ContextVar[str | None] = ContextVar("audit_llm_call", default=None)
 
 
 def _utcnow() -> datetime:
@@ -190,6 +192,7 @@ def stop(end_reason: str) -> int:
         _search_attempt_id.set(None)
         _analysis_id.set(None)
         _analysis_clock.set(None)
+        _llm_call_id.set(None)
 
 
 # ── Work in progress ──────────────────────────────────────────────────────────
@@ -346,6 +349,8 @@ def analysis_finished(
     started = _analysis_clock.get()
     _analysis_id.set(None)
     _analysis_clock.set(None)
+    # A call left open by an analysis that ended is not the next analysis's call.
+    _llm_call_id.set(None)
 
     fields: dict = {"ended_at": _utcnow(), "outcome": outcome}
     # Measured on the monotonic clock: the wall clock can step while a lead is being
@@ -358,6 +363,97 @@ def analysis_finished(
     if result is not None:
         fields["result"] = result
     _outbox.put("analyses", analysis_id, fields)
+
+
+@_guarded
+def llm_call_started(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> None:
+    """Open the row for one call to the model, with the prompts it was given.
+
+    Nothing is recorded outside an analysis: ``llm_calls.analysis_id`` is NOT NULL, so a
+    call made with no lead in hand has no row to hang off, and leaving it unrecorded is
+    better than a fragment the store refuses hours later.
+
+    The hash is kept beside the prompt because it outlives it: the text is cleared after
+    the retention window and the hash is not, so which version of the system prompt
+    produced a given pitch stays answerable. There is no parameter for the headers, and
+    deliberately: the API key travels in them.
+    """
+    analysis_id = _analysis_id.get()
+    if analysis_id is None:
+        return
+
+    call_id = str(uuid.uuid4())
+    _outbox.put("llm_calls", call_id, {
+        "analysis_id": analysis_id,
+        "started_at": _utcnow(),
+        "model": model,
+        "attempts": [],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "system_prompt": system_prompt,
+        "system_prompt_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+        "user_prompt": user_prompt,
+    })
+    _llm_call_id.set(call_id)
+
+
+@_guarded
+def llm_call_finished(
+    *,
+    attempts: list[dict],
+    final_status: int | None = None,
+    latency_ms: int | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    cost_usd: float | None = None,
+    response_raw: str | None = None,
+) -> None:
+    """Close the HTTP half of the call: what was attempted, and what came back.
+
+    Written from a ``finally``, so a call that ended in a timeout or a refusal still
+    records the attempts it made and the status it got, when it got one. ``response_raw``
+    is the content as the model sent it, before the code fences are stripped off.
+    """
+    call_id = _llm_call_id.get()
+    if call_id is None:
+        return
+
+    _outbox.put("llm_calls", call_id, {
+        "attempts": attempts,
+        "final_status": final_status,
+        "latency_ms": latency_ms,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cost_usd": cost_usd,
+        "response_raw": response_raw,
+    })
+
+
+@_guarded
+def llm_call_parsed(response_parsed: dict | None, *, parsed_ok: bool) -> None:
+    """Close the call with what the worker made of the answer.
+
+    ``parsed_ok`` False is an answer that could not be used, not a call that failed: the
+    request succeeded, the tokens were spent and the lead is still reported, with an empty
+    pitch. Nothing downstream can tell those two apart, which is why they are told apart
+    here.
+    """
+    call_id = _llm_call_id.get()
+    if call_id is None:
+        return
+
+    _llm_call_id.set(None)
+    _outbox.put("llm_calls", call_id, {
+        "response_parsed": response_parsed,
+        "parsed_ok": parsed_ok,
+    })
 
 
 @_guarded

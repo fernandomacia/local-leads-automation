@@ -80,6 +80,9 @@ class TestNoOpWithoutStart:
         recorder.card_skipped_known("ejemplo.es")
         recorder.search_finished("completed", cards_seen=3)
         recorder.analysis_started(_JOB)
+        recorder.llm_call_started(model="m", system_prompt="s", user_prompt="u")
+        recorder.llm_call_finished(attempts=[])
+        recorder.llm_call_parsed({}, parsed_ok=True)
         recorder.analysis_finished("analysed")
         recorder.pause(recorder.PAUSE_PAYMENT, 120)
         recorder.heartbeat()
@@ -119,6 +122,11 @@ class TestEveryRowCanBeInserted:
     def test_an_analysis(self, started):
         recorder.analysis_started(_JOB)
         self._assert_complete(started, "analyses")
+
+    def test_an_llm_call(self, started):
+        recorder.analysis_started(_JOB)
+        recorder.llm_call_started(model="deepseek/deepseek-chat", system_prompt="s", user_prompt="u")
+        self._assert_complete(started, "llm_calls")
 
     def test_a_pause(self, started):
         recorder.pause(recorder.PAUSE_RATE_LIMIT, 60)
