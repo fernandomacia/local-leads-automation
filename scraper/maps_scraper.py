@@ -10,7 +10,6 @@ import re
 import time
 from urllib.parse import quote_plus, urlparse
 
-import idna
 from playwright.sync_api import (
     sync_playwright,
     Browser,
@@ -29,8 +28,8 @@ from config import (
     RETRY_BACKOFF_BASE,
     MAX_EXTRACTION_RETRIES,
     MAX_IDLE_SCROLLS,
-    SOCIAL_NAMES,
 )
+from scraper.domains import normalize_domain
 from scraper.social import identify_platform
 
 # Google Maps DOM hooks — centralized so a class-name change only needs one edit
@@ -42,61 +41,6 @@ SELECTOR_ADDRESS = 'button[data-item-id="address"]'
 SELECTOR_FEED = 'div[role="feed"]'
 
 SCROLL_PIXELS = 600
-
-# Maps card fields the AI can use as pitch arguments — parallel to SEO_ISSUE_LABELS
-# in web_analyzer.py. Issue key -> (job field that must be populated, pitch label).
-# Both halves live in one entry so an issue cannot be declared with a field and no
-# label, or with a label the detector never produces.
-MAPS_ISSUES: dict[str, tuple[str, str]] = {
-    "no_website": ("website", "Sin sitio web en Google Maps"),
-    "no_phone":   ("phone",   "Sin teléfono en Google Maps"),
-    "no_address": ("address", "Sin dirección en Google Maps"),
-}
-
-# The website button can be pointed at the wrong place rather than left empty, and then
-# it is this finding and never `no_website`: the business may well have a site. Nobelia
-# Textil did — its card sent anyone pressing "Sitio web" to LinkedIn, the card was
-# recorded as complete, and the strongest line the agent had went unsaid.
-#
-# Kept out of MAPS_ISSUES because its label names the network, which no missing field does.
-SOCIAL_AS_WEBSITE = "social_as_website"
-_SOCIAL_AS_WEBSITE_LABEL = "La ficha de Google Maps enlaza a {network} en lugar de a su web"
-
-
-def _card_platform(lead: dict) -> str | None:
-    """Return the network the card's website button pointed at, if it pointed at one."""
-    return next(iter(lead.get("social_networks") or {}), None)
-
-
-def maps_card_issues(lead: dict) -> dict[str, str]:
-    """Return what this business's Google Maps card is missing.
-
-    Read here, from the scraped card, and reported with the ingest batch — never
-    re-derived later. The analysis step used to compute it from the job the API handed
-    back, which loses the one finding it exists for: an agent supplies a website through
-    the panel for a business whose card had none, the worker then sees a job *with* a
-    website, and "no website on the listing" silently becomes "the listing was complete".
-    The overwrite was invisible because it was a well-formed reading of the wrong thing.
-
-    An empty dict is a real answer — the card is complete — and is what makes NULL on the
-    API side mean "no worker has reported on this lead", so callers must send it as it
-    comes rather than omitting it when empty.
-
-    ``no_website`` and ``social_as_website`` can never both appear: a button pointing at
-    a social profile is a wrong destination, not a missing one, and the business may have
-    a website all the same.
-    """
-    issues = {}
-    for key, (field, label) in MAPS_ISSUES.items():
-        # Exclusive by construction rather than by the caller remembering the rule: the
-        # social profile replaces the missing-website finding, never joins it.
-        if key == "no_website" and (platform := _card_platform(lead)):
-            issues[SOCIAL_AS_WEBSITE] = _SOCIAL_AS_WEBSITE_LABEL.format(
-                network=SOCIAL_NAMES.get(platform, platform))
-        elif not lead.get(field):
-            issues[key] = label
-    return issues
-
 
 def _get_delay(base_delay: float) -> float:
     """Return base_delay with ±JITTER_RANGE% random variance to mimic human timing."""
@@ -313,65 +257,6 @@ def _social_profile(href: str) -> str:
     return f"{parsed.scheme}://{host}{parsed.path}".rstrip("/")
 
 
-def _to_ascii(host: str) -> str:
-    """Punycode a hostname, or return it as written if it cannot be encoded.
-
-    Mirrors ``Domain::toAscii()``: falling back to the name as written rather than to an
-    empty string, which would compare equal to everything. An already-ASCII host is
-    returned untouched rather than round-tripped, because ``idna`` is stricter than the
-    profile the API uses and would reject hosts PHP accepts.
-
-    **The two are not identical in that fallback, and it is bounded on purpose.** PHP runs
-    ICU's UTS-46, which encodes anything it can parse — an emoji label, a mixed
-    underscore-and-accent host — while ``idna`` enforces IDNA2008 validity and refuses
-    them. Where it refuses, this returns the name as written and the API's answer will not
-    match it. The cost of a miss is one slot in ``max_results``, never a duplicate lead:
-    the check is an optimisation, and the API normalises what it is *sent* at ingest, so
-    deduplication there is unaffected. See ``TestNormalizeDomainAgreesWithTheApi``.
-    """
-    if not host or host.isascii():
-        return host
-
-    try:
-        return idna.encode(host, uts46=True).decode("ascii")
-    except idna.IDNAError:
-        return host
-
-
-def _normalize_domain(url: str) -> str:
-    """Normalize a URL to the bare ASCII hostname the API stores.
-
-    A port-for-port translation of ``App\\Values\\Domain::from()``, and it has to stay
-    one: ``POST /domains/check`` answers with domains *it* normalised, and this is what
-    those answers are compared against. The two disagreed on six of the nine cases in
-    ``TestNormalizeDomain``, and every disagreement is a business re-ingested, re-analysed
-    at the owner's expense and rung again:
-
-    - **No punycode.** The API stores ``xn--peluquera-n5a.es``, this returned
-      ``peluquería.es``, so no accented domain ever matched — and Spanish domains with an
-      ñ or an accent are not an edge case in this market.
-    - **``netloc`` is not a hostname.** It carries the port *and* any userinfo, so
-      ``https://user:pass@ejemplo.es/x`` normalised to ``user``. ``.hostname`` is the field
-      that means what this function means.
-    - **A URL with no scheme produced the empty string**, because ``urlparse`` needs one to
-      see a host at all — so a bare ``ejemplo.es`` from a Maps card matched nothing.
-    - **A trailing dot survived**, and ``ejemplo.es.`` is the same site as ``ejemplo.es``.
-    """
-    url = url.strip()
-
-    if not url:
-        return ""
-
-    try:
-        # The "//" prefix is what lets a scheme-less "www.ejemplo.es/tienda" parse, and is
-        # the same fallback the API applies for the same reason.
-        host = urlparse(url).hostname or urlparse(f"//{url}").hostname or url
-    except ValueError:
-        host = url
-
-    return _to_ascii(host.rstrip(".").lower().removeprefix("www."))
-
-
 def scrape_incrementally(
     profession: str,
     city: str,
@@ -394,7 +279,7 @@ def scrape_incrementally(
         max_results: Stop once this many non-skipped leads have been yielded.
             ``None`` collects until the search is exhausted.
         is_known: Asked about each extracted lead's normalized domain (see
-            ``_normalize_domain``) and, when it answers True, the lead is
+            ``normalize_domain``) and, when it answers True, the lead is
             skipped silently and does not count toward ``max_results``.
             Asked per business rather than handed a set up front, because a
             set can only hold what the caller already knew: with
@@ -429,7 +314,7 @@ def scrape_incrementally(
                     if lead is None:
                         continue
                     name = lead.get("lead", "")
-                    domain = _normalize_domain(lead.get("website", ""))
+                    domain = normalize_domain(lead.get("website", ""))
                     if lead["website"] and is_known(domain):
                         continue
                     if not lead["website"]:

@@ -1,8 +1,11 @@
 """Tests for audit/recorder.py — a real outbox in tmp_path, no DSN, no network."""
 
 import logging
+import os
 import re
 import socket
+import subprocess
+import sys
 from datetime import timezone
 from pathlib import Path
 
@@ -17,6 +20,8 @@ _MIGRATION = Path(__file__).resolve().parent.parent / "audit" / "migrations" / "
 _JOB = {"id": "lead-1", "lead_search_id": "search-1", "business_name": "Ejemplo SL",
         "website": "https://ejemplo.es"}
 _SEARCH = {"id": "search-1", "profession": "fontaneros", "city": "Elche", "max_results": 5}
+_CARD = {"lead": "Abogados García", "website": "https://www.Ejemplo.es/contacto",
+         "phone": "965123456", "address": "Calle Mayor 1", "city": "Elche"}
 
 
 def not_null_columns(table: str) -> set[str]:
@@ -71,6 +76,8 @@ class TestNoOpWithoutStart:
 
     def test_every_function_is_a_no_op(self, tmp_path):
         recorder.search_started(_SEARCH)
+        recorder.card_reported(_CARD)
+        recorder.card_skipped_known("ejemplo.es")
         recorder.search_finished("completed", cards_seen=3)
         recorder.analysis_started(_JOB)
         recorder.analysis_finished("analysed")
@@ -103,6 +110,11 @@ class TestEveryRowCanBeInserted:
     def test_a_search_attempt(self, started):
         recorder.search_started(_SEARCH)
         self._assert_complete(started, "search_attempts")
+
+    def test_a_card(self, started):
+        recorder.search_started(_SEARCH)
+        recorder.card_reported(_CARD)
+        self._assert_complete(started, "cards")
 
     def test_an_analysis(self, started):
         recorder.analysis_started(_JOB)
@@ -177,6 +189,68 @@ class TestDuration:
         assert closing["error_message"] == "boom"
 
 
+# ── Every card the scrape looked at ───────────────────────────────────────────
+
+class TestCards:
+    """Kept or dropped, a card the scrape examined leaves a row.
+
+    The dropped ones are the point: they never reach the worker, so without a row there
+    is nothing afterwards to explain a search that saw forty businesses and reported four.
+    """
+
+    def test_a_kept_card_holds_the_lead_as_the_scraper_produced_it(self, started):
+        recorder.search_started(_SEARCH)
+        recorder.card_reported(_CARD)
+
+        card = fragments(started, "cards")[0]
+        assert card["outcome"] == "reported"
+        assert card["search_attempt_id"] == recorder.current_search_attempt_id()
+        assert card["business_name"] == "Abogados García"
+        assert card["phone"] == "965123456"
+        assert card["address"] == "Calle Mayor 1"
+        assert card["raw"] == _CARD
+        # Normalised the way the API answers POST /domains/check — lowercased, the www
+        # dropped, the path gone — so a card and a domain can be compared at all.
+        assert card["domain"] == "ejemplo.es"
+
+    def test_the_findings_are_recorded_because_they_outlive_the_purge(self, started):
+        # maps_issues is the one reading of the card the 90-day purge leaves standing —
+        # raw, the name, the website, the phone and the address are all cleared — so it is
+        # what a count of cards with no website is answered from years later.
+        recorder.search_started(_SEARCH)
+        recorder.card_reported({**_CARD, "website": "", "phone": ""})
+
+        assert fragments(started, "cards")[0]["maps_issues"] == {
+            "no_website": "Sin sitio web en Google Maps",
+            "no_phone": "Sin teléfono en Google Maps",
+        }
+
+    def test_a_complete_card_records_an_empty_finding(self, started):
+        # {} is an answer — the card was complete — and NULL would be "nobody looked".
+        recorder.search_started(_SEARCH)
+        recorder.card_reported(_CARD)
+        assert fragments(started, "cards")[0]["maps_issues"] == {}
+
+    def test_a_dropped_card_holds_only_what_the_listing_showed(self, started):
+        recorder.search_started(_SEARCH)
+        recorder.card_skipped_known("ejemplo.es")
+
+        card = fragments(started, "cards")[0]
+        assert card["outcome"] == "skipped_known_domain"
+        assert card["domain"] == "ejemplo.es"
+        # The question is answered before the card's own tab is opened, so there was
+        # never a name, a phone or an address to record.
+        assert "business_name" not in card
+        assert "raw" not in card
+
+    def test_a_card_outside_a_search_records_nothing(self, started):
+        # A card belongs to an attempt at a search: the column is NOT NULL, so a row
+        # without one is a row Neon refuses.
+        recorder.card_reported(_CARD)
+        recorder.card_skipped_known("ejemplo.es")
+        assert fragments(started, "cards") == []
+
+
 # ── The work in progress ──────────────────────────────────────────────────────
 
 class TestCurrentWork:
@@ -248,3 +322,27 @@ class TestNothingReachesTheCaller:
 
         recorder.search_started(_SEARCH)  # must not raise
         assert recorder.current_search_attempt_id() is None
+
+
+# ── The audit needs no browser ────────────────────────────────────────────────
+
+class TestTheAuditDoesNotNeedABrowser:
+    def test_importing_the_recorder_does_not_import_playwright(self):
+        """Checked in a clean interpreter rather than by reading the imports.
+
+        The recorder needs a card's domain and its findings, and both used to live with
+        the Maps scraper: taking them from there would make Chromium a requirement of
+        recording anything, and a fresh process is the only place that shows.
+        """
+        env = {**os.environ,
+               "API_BASE_URL": "http://127.0.0.1:8000", "API_TOKEN": "test-token",
+               "SENDER_COMPANY": "Test Company SL", "OPENROUTER_API_KEY": "test-key"}
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import audit.recorder, sys; print('playwright' in sys.modules)"],
+            cwd=Path(__file__).resolve().parent.parent,
+            env=env, capture_output=True, text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "False"

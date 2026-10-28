@@ -24,6 +24,9 @@ scraper/
   maps_scraper.py            # Extracts lead, website, phone, address from Google Maps
                               # scrape_incrementally(): one card at a time, for worker.py
   web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring, is_contactable()
+  card_issues.py             # maps_card_issues(): what a Maps card is missing (pure, no browser)
+  domains.py                 # normalize_domain(): the hostname the API stores, a port of Domain
+  social.py                  # identify_platform(): which network a URL belongs to
   net_guard.py               # SSRF guard shared by the HTTP fetches and the browser fallback
   compliance/                # Legal audit package — detect_compliance() returns issues + details
     vocabulary.py            # Multilingual lexicon + URL slugs (data only)
@@ -323,6 +326,23 @@ def analyze_website(url: str) -> dict:
   table, the ones with a default included; later fragments carry only what they add. One
   missing is a row Neon refuses outright, so `tests/test_audit_recorder.py` checks the first
   fragments against the migration itself rather than against a restated list.
+- **A card dropped for a domain the system already has is recorded through the predicate**,
+  wrapped in `worker.py`. The scrape yields only the cards it keeps, so that answer is the
+  one place a dropped card is visible, and the scraper stays unaware the audit exists. It
+  is asked at most once per card, so every `True` is one card — deduplicating by domain
+  would lose the second of two branches sharing one website.
+- **`cards.maps_issues` is the only card data that outlives the purge**, which is why it
+  is recorded even though the ingest reports it too. `purge_audit_content()` clears `raw`,
+  the name, the website, the phone and the address after 90 days and leaves the findings
+  standing, so they are what a long-term count of cards with no website is answered from.
+  It is the same pure `maps_card_issues()` the ingest calls, on the same scraped dict in
+  the same pass — not the second reading the ingest rule warns about, which is about
+  deriving findings from the job the API hands back, after an agent may have typed a
+  website into the panel.
+- **Nothing in `audit/` imports Playwright.** The recorder needs a card's domain and its
+  findings, which is why `scraper/domains.py` and `scraper/card_issues.py` are leaf
+  modules, like `scraper/social.py` before them. A test imports `audit.recorder` in a
+  clean interpreter and fails if Chromium's package came along with it.
 - **An outcome is recorded in a `finally`.** `run_search_job` and `run_analysis_job` both
   have exits that re-raise — Ctrl+C, a 402, a 429 — and a path that recorded nothing would
   read as work still in progress rather than work that ended.

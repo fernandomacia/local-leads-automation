@@ -13,6 +13,19 @@ worker requirements to.
 
 ## [Unreleased]
 
+### Changed
+
+- **`maps_card_issues()` and the domain normalisation are leaf modules now**
+  (`scraper/card_issues.py`, `scraper/domains.py`), so the audit can record a card's
+  domain and its findings without Chromium's package being a requirement of recording
+  anything. Both were private to the Maps scraper, which imports Playwright at module
+  scope; the functions are unchanged, and a test imports `audit.recorder` in a clean
+  interpreter to keep it that way.
+- **A card's findings are recorded with it** rather than left for the ingest alone.
+  `maps_card_issues()` is pure — a dict in, a dict out — so the same call fills the API's
+  payload and the card's audit row from the same scraped card, and `cards.maps_issues` is
+  the one reading of a card that `purge_audit_content()` leaves standing after 90 days.
+
 ### Added
 
 - **Local audit outbox (SQLite, per machine) for the shared audit store.** One file per
@@ -36,4 +49,11 @@ worker requirements to.
   how long it took, the error that ended it and the payload the API was sent — which on a
   refused report is the one thing worth having afterwards. `worker.py` names no table and no
   column: it says a search was released because the API went out of reach, and `recorder`
-  decides what that is. The cards, the OpenRouter calls and the log handler come next.
+  decides what that is. The OpenRouter calls and the log handler come next.
+- **Every Google Maps card the scrape examines is recorded, the kept ones and the dropped
+  ones.** A kept card holds the lead as the scraper produced it, with its domain normalised
+  the way the API answers `POST /domains/check` so the two can be compared at all; a card
+  dropped for a domain already in the system holds only that domain, because the question
+  is answered from the listing, before the card's own tab is opened. The dropped ones are
+  what this is for: they never reach the worker, so nothing afterwards could explain a
+  search that looked at forty businesses and reported four.

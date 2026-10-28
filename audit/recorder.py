@@ -27,6 +27,8 @@ from functools import wraps
 
 from audit.outbox import Outbox
 from config import API_BASE_URL, APP_VERSION, AUDIT_DATABASE_URL, ENVIRONMENT
+from scraper.card_issues import maps_card_issues
+from scraper.domains import normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +256,59 @@ def search_finished(
     if error is not None:
         fields["error"] = _describe(error)
     _outbox.put("search_attempts", attempt_id, fields)
+
+
+@_guarded
+def card_reported(lead: dict) -> None:
+    """Record a Maps card the scrape kept and handed to the ingest.
+
+    ``maps_issues`` is computed here as well as at the ingest, from the same dict and by
+    the same pure function, and the duplication is deliberate: it is the only reading of
+    the card that outlives the 90-day purge — ``raw``, the name, the website, the phone
+    and the address are all cleared — so it is what "how many cards in this province had
+    no website" is answered from years later.
+
+    This is not the second reading the ingest rule warns about. That rule is about
+    deriving the findings from the job the API hands back, where a website an agent typed
+    into the panel has already replaced what the listing showed; here the argument is the
+    scraped card itself, in the same pass that reports it.
+    """
+    attempt_id = _search_attempt_id.get()
+    if attempt_id is None:
+        return
+
+    _outbox.put("cards", str(uuid.uuid4()), {
+        "search_attempt_id": attempt_id,
+        "seen_at": _utcnow(),
+        "outcome": "reported",
+        "maps_issues": maps_card_issues(lead),
+        "domain": normalize_domain(lead.get("website") or "") or None,
+        "business_name": lead.get("lead") or None,
+        "website": lead.get("website") or None,
+        "phone": lead.get("phone") or None,
+        "address": lead.get("address") or None,
+        "raw": lead,
+    })
+
+
+@_guarded
+def card_skipped_known(domain: str) -> None:
+    """Record a Maps card dropped because the system already has its domain.
+
+    The domain is all there is: the question is answered from the listing, before the
+    card's own tab is opened, so the business's name, phone and address were never read.
+    It arrives normalised, since that is what the scraper asks the predicate about.
+    """
+    attempt_id = _search_attempt_id.get()
+    if attempt_id is None:
+        return
+
+    _outbox.put("cards", str(uuid.uuid4()), {
+        "search_attempt_id": attempt_id,
+        "seen_at": _utcnow(),
+        "outcome": "skipped_known_domain",
+        "domain": domain or None,
+    })
 
 
 @_guarded

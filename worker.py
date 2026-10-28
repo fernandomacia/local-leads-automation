@@ -20,7 +20,8 @@ import time
 import requests
 
 from config import API_BASE_URL, APP_VERSION, BATCH_SIZE, HEADLESS, POLL_INTERVAL, SOCIAL_DOMAINS
-from scraper.maps_scraper import scrape_incrementally, maps_card_issues
+from scraper.card_issues import maps_card_issues
+from scraper.maps_scraper import scrape_incrementally
 from scraper.web_analyzer import analyze
 from ai.message_generator import generate
 from api.client import (
@@ -396,6 +397,30 @@ def _known_domain_check():
     return is_known
 
 
+def _recorded_known_check(skipped: list[str]):
+    """The known-domain predicate, recording and counting the cards it drops.
+
+    Wrapped here rather than inside the scraper, which yields only the cards it keeps: a
+    card dropped for a domain the system already has never reaches the worker, so without
+    this it would leave no trace of having been examined — and the scraper has no business
+    knowing the audit exists.
+
+    Every True is one card. ``scrape_incrementally`` opens each listing href once and asks
+    once per lead extracted, so the same card is never counted twice; two cards sharing one
+    website are two cards, and deduplicating by domain would lose the second.
+    """
+    is_known = _known_domain_check()
+
+    def is_known_and_recorded(domain: str) -> bool:
+        if not is_known(domain):
+            return False
+        skipped.append(domain)
+        recorder.card_skipped_known(domain)
+        return True
+
+    return is_known_and_recorded
+
+
 def _flush_batch(search_id: str, batch: list[dict]) -> int:
     """Submit a batch of leads. Returns the count actually inserted after server-side dedup."""
     if not batch:
@@ -422,15 +447,22 @@ def run_search_job(job: dict) -> int:
     total = 0
     seen = 0
     reported = 0
+    # Written by the predicate as it answers, which is the only place a dropped card is
+    # visible: a list rather than a counter so the closure has somewhere to put it.
+    skipped: list[str] = []
     # The outcome is recorded in a finally, so the path that re-raises is covered like the
     # ones that return; anything that does not name its own outcome is a failure.
     outcome, error = "failed", None
     try:
         for lead in scrape_incrementally(
             job["profession"], job["city"], headless=HEADLESS,
-            is_known=_known_domain_check(), max_results=job["max_results"],
+            is_known=_recorded_known_check(skipped), max_results=job["max_results"],
         ):
             seen += 1
+            # Recorded on the way past, not after the batch goes up: the row answers "the
+            # scrape looked at this card", and `leads_reported` is what says how many of
+            # them the API was actually sent.
+            recorder.card_reported(lead)
             batch.append(map_to_api_shape(lead))
             if len(batch) >= BATCH_SIZE:
                 total += _flush_batch(job["id"], batch)
@@ -476,7 +508,8 @@ def run_search_job(job: dict) -> int:
             pass
     finally:
         recorder.search_finished(
-            outcome, cards_seen=seen, leads_reported=reported, leads_inserted=total, error=error,
+            outcome, cards_seen=seen, cards_skipped_known=len(skipped),
+            leads_reported=reported, leads_inserted=total, error=error,
         )
     return total
 

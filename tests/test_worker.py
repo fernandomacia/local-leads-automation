@@ -10,7 +10,6 @@ import requests
 
 from api.client import ReportRejected
 from audit import recorder
-from scraper.maps_scraper import maps_card_issues
 import logging
 from contextlib import ExitStack
 
@@ -26,6 +25,7 @@ from worker import (
     _finish,
     _known_domain_check,
     _progress,
+    _recorded_known_check,
     map_analysis_to_api_shape,
     map_to_api_shape,
     run_analysis_job,
@@ -206,40 +206,6 @@ class TestMapAnalysisToApiShape:
         assert "email_subject" not in result
         assert "email_body" not in result
         assert result["phone_script"] == "Script"
-
-
-# ── maps_card_issues ──────────────────────────────────────────────────────────
-
-class TestMapsCardIssues:
-    def test_all_fields_missing_returns_all_issues(self):
-        lead = {"website": "", "phone": "", "address": ""}
-        issues = maps_card_issues(lead)
-        assert set(issues.keys()) == {"no_website", "no_phone", "no_address"}
-
-    def test_all_fields_present_returns_empty(self):
-        lead = {"website": "https://example.com", "phone": "965123456", "address": "Calle 1"}
-        assert maps_card_issues(lead) == {}
-
-    def test_only_website_missing(self):
-        lead = {"website": "", "phone": "965123456", "address": "Calle 1"}
-        issues = maps_card_issues(lead)
-        assert list(issues.keys()) == ["no_website"]
-
-    def test_issue_values_are_human_readable_labels(self):
-        issues = maps_card_issues({"website": "", "phone": "", "address": ""})
-        for label in issues.values():
-            assert isinstance(label, str)
-            assert len(label) > 0
-
-    def test_read_from_the_scraped_card_not_from_a_later_job(self):
-        # The bug this whole arrangement exists for: an agent supplies a website through
-        # the panel for a business whose card had none. The card said no_website and the
-        # job no longer does, so the reading has to be taken at ingest and kept.
-        card = {"website": "", "phone": "965123456", "address": "Calle 1"}
-        job_after_the_agent_typed_a_url = {**card, "website": "https://escrita-a-mano.es"}
-
-        assert maps_card_issues(card) == {"no_website": "Sin sitio web en Google Maps"}
-        assert maps_card_issues(job_after_the_agent_typed_a_url) == {}
 
 
 # ── Terminal progress output ──────────────────────────────────────────────────
@@ -996,6 +962,7 @@ def audit():
         "worker.recorder",
         start=DEFAULT, stop=DEFAULT, heartbeat=DEFAULT, pause=DEFAULT,
         search_started=DEFAULT, search_finished=DEFAULT,
+        card_reported=DEFAULT, card_skipped_known=DEFAULT,
         analysis_started=DEFAULT, analysis_finished=DEFAULT,
     ) as mocks:
         mocks["stop"].return_value = 0
@@ -1038,6 +1005,37 @@ class TestASearchRecordsHowItEnded:
         counts = audit.search_finished.call_args.kwargs
         assert counts["leads_reported"] == 2
         assert counts["leads_inserted"] == 1
+
+    def test_both_the_cards_kept_and_the_cards_dropped_are_recorded(self, audit):
+        # The scraper drops a known domain before yielding, so the worker only ever sees
+        # the cards it keeps: the dropped one is recorded by the predicate it was asked
+        # through, which is the single place it is visible.
+        answers = []
+
+        def scrape(profession, city, headless=False, is_known=None, max_results=None):
+            answers.append(is_known("conocido.es"))
+            answers.append(is_known("nuevo.es"))
+            yield {"lead": "Nuevo SL", "website": "https://nuevo.es"}
+
+        with patch("worker.scrape_incrementally", side_effect=scrape), \
+             patch("worker.check_known_domains",
+                   side_effect=lambda domains: domains if domains == ["conocido.es"] else []), \
+             patch("worker.report_leads", return_value=1), \
+             patch("worker.complete_search_job"):
+            run_search_job(dict(self._SEARCH))
+
+        assert answers == [True, False]
+        audit.card_skipped_known.assert_called_once_with("conocido.es")
+        assert audit.card_reported.call_args.args[0]["lead"] == "Nuevo SL"
+        assert audit.search_finished.call_args.kwargs["cards_skipped_known"] == 1
+
+    def test_the_predicate_still_answers_what_it_answered_before(self, audit):
+        # The wrapper is around the check, not in place of it: a known domain is still
+        # skipped and a new one still scraped, which is what max_results is spent on.
+        with patch("worker.check_known_domains", side_effect=lambda domains: domains):
+            assert _recorded_known_check([])("conocido.es") is True
+        with patch("worker.check_known_domains", return_value=[]):
+            assert _recorded_known_check([])("nuevo.es") is False
 
     def test_a_broken_scrape_is_failed_with_its_error(self, audit):
         with patch("worker.scrape_incrementally", side_effect=RuntimeError("selector gone")), \
