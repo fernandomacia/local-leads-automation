@@ -41,6 +41,7 @@ api/
 audit/
   migrations/                # SQL for the shared audit store (Neon Postgres)
   outbox.py                  # Local SQLite buffer of audit fragments; never raises on put()
+  sync.py                    # Drains the outbox into Neon from a background thread
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
 env_select.py                # Asks which env file to load, before config.py reads one
 ```

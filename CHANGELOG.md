@@ -21,3 +21,11 @@ worker requirements to.
   where an audit failure must never turn into a lead reported as failed. Fragments drain in
   the order they were written, so a row's first fragment, the one carrying its required
   columns, always reaches Neon before the later ones that complete it.
+- **The outbox drains into the shared store from a background thread in the worker.** With no
+  `AUDIT_DATABASE_URL` it does nothing and everything stays in the local file. Each fragment
+  updates the columns it carries and inserts the row only if it was not there yet: Postgres
+  checks `NOT NULL` on the row it is asked to insert before it looks for a conflict, so a
+  plain upsert refused every fragment that *completed* a row rather than opening it. An
+  outage marks nothing and retries the batch after a growing pause; a refusal replays the
+  batch one fragment at a time under savepoints, so the one fragment Neon will never take is
+  set aside with its error instead of holding back every fragment written after it.

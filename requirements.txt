@@ -10,3 +10,6 @@ idna~=3.18
 
 # Configuration
 python-dotenv~=1.2
+
+# Audit store (Neon Postgres)
+psycopg[binary]~=3.2
