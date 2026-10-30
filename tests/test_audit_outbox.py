@@ -1,4 +1,4 @@
-"""Tests for audit/outbox.py — the local buffer the sync thread drains to Neon."""
+"""Tests for audit/outbox.py — the local buffer everything audited waits in."""
 
 import sqlite3
 import sys

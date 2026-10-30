@@ -1,20 +1,20 @@
-"""Local outbox for audit records: written by the worker, drained to Neon by audit.sync.
+"""Local outbox for audit records: written by the worker, waiting to be sent on.
 
 One SQLite file per machine, outside the repository. Each put() is one fragment of a row
-in the shared audit store, holding the columns known at that moment, and fragments are
-drained in the order they were written: a row's first fragment, which carries its
-required columns, always reaches Neon before the later ones that complete it.
+in the audit store, holding the columns known at that moment, and fragments leave in the
+order they were written: a row's first fragment, which carries its required columns,
+always arrives before the later ones that complete it.
 
-SQLite suits this file and would not suit the shared store: here one process on one
-machine writes it, and nothing syncs the file itself.
+SQLite suits this file and would not suit the store it feeds: here one process on one
+machine writes it, and nothing replicates the file itself.
 
-A fragment Neon refuses for good (a bad column, a value it cannot take) is marked failed
-with its error and left out of the queue, so one bad fragment cannot hold back every one
-written after it.
+A fragment the store refuses for good (a bad column, a value it cannot take) is marked
+failed with its error and left out of the queue, so one bad fragment cannot hold back
+every one written after it.
 
 put() never raises. The worker calls it from inside a search and an analysis, and an
 audit failure must never turn into a lead reported as failed. The read and bookkeeping
-methods may raise; their only caller is the sync thread, which handles it.
+methods may raise; their caller is whatever drains the outbox, which handles it.
 
 Failures are logged under the "audit" logger hierarchy, which the audit log handler
 leaves out so a broken outbox cannot feed on its own warnings.
@@ -35,13 +35,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# The tables of the shared store (audit/migrations). A fragment for anything else is a
-# programming error, dropped with a warning rather than left to fail at every sync.
+# The tables of the audit store, which SegurSEO-API owns. A fragment for anything else is
+# a programming error, dropped with a warning rather than left to fail on every attempt.
 TARGETS = frozenset({
     "runs", "search_attempts", "cards", "analyses", "llm_calls", "log_entries",
 })
 
-# Synced records stay this long locally; they hold the same personal data as Neon.
+# Sent records stay this long locally; they hold the same personal data as the store.
 SYNCED_RETENTION_DAYS = 7
 # Failed ones stay longer: they are what someone will want to look at.
 FAILED_RETENTION_DAYS = 30
@@ -102,7 +102,7 @@ class Outbox:
         self._lock = threading.Lock()
 
     def _connect(self) -> sqlite3.Connection:
-        # A connection per operation: the worker thread and the sync thread both use the
+        # A connection per operation: the worker thread and whatever drains the outbox
         # outbox, and sqlite3 connections must not cross threads.
         return sqlite3.connect(self.path, timeout=5)
 
@@ -114,7 +114,7 @@ class Outbox:
                 return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with closing(self._connect()) as conn:
-                # WAL lets the sync thread read while the worker writes.
+                # WAL lets a reader work through the outbox while the worker writes.
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(_SCHEMA)
             self._ready = True
@@ -141,7 +141,7 @@ class Outbox:
             return False
 
     def pending(self, limit: int = 200) -> list[PendingRecord]:
-        """The oldest fragments not yet in Neon, in the order they were written."""
+        """The oldest fragments not yet sent, in the order they were written."""
         self._ensure_schema()
         with closing(self._connect()) as conn:
             rows = conn.execute(
@@ -176,7 +176,7 @@ class Outbox:
             )
 
     def mark_failed(self, seq: int, error: str) -> None:
-        """Take a fragment Neon refused for good out of the queue, keeping why."""
+        """Take a fragment the store refused for good out of the queue, keeping why."""
         self._ensure_schema()
         with closing(self._connect()) as conn, conn:
             conn.execute(

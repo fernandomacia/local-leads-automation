@@ -52,7 +52,7 @@ def calls(box: Outbox) -> list[dict]:
 def audited(tmp_path):
     """A run with an analysis in progress, writing to a temporary outbox."""
     box = Outbox(tmp_path / "llm-outbox.sqlite")
-    recorder.start(outbox=box, dsn="")
+    recorder.start(outbox=box)
     recorder.analysis_started({"id": "lead-1", "business_name": "Ejemplo SL"})
     yield box
     recorder.stop("stopped")
@@ -190,7 +190,7 @@ class TestWithoutAnAnalysis:
         # llm_calls.analysis_id is NOT NULL, so a call made with no lead in hand has no
         # row to hang off: leaving it unrecorded beats a fragment the store refuses.
         box = Outbox(tmp_path / "llm-outbox.sqlite")
-        recorder.start(outbox=box, dsn="")
+        recorder.start(outbox=box)
         try:
             with patch("ai.message_generator.requests.post",
                        return_value=FakeResponse(payload=body())):

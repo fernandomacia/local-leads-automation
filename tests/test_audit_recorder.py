@@ -1,8 +1,7 @@
-"""Tests for audit/recorder.py — a real outbox in tmp_path, no DSN, no network."""
+"""Tests for audit/recorder.py — a real outbox in tmp_path, nothing sent anywhere."""
 
 import logging
 import os
-import re
 import socket
 import subprocess
 import sys
@@ -15,28 +14,26 @@ from audit import recorder
 from audit.outbox import Outbox
 from config import APP_VERSION
 
-_MIGRATION = Path(__file__).resolve().parent.parent / "audit" / "migrations" / "001_initial.sql"
+# What each row cannot be opened without. Stated here, not read from a schema: the tables
+# live in SegurSEO-API now, so this is the worker's side of a contract it cannot see, and
+# a column the API adds as required has to be added here by hand. `id` is left out because
+# it travels as the fragment's record_id rather than among its fields.
+REQUIRED_COLUMNS = {
+    "runs": {"machine", "worker_version", "started_at", "last_seen_at"},
+    "search_attempts": {"run_id", "api_search_id", "profession", "city", "started_at",
+                        "cards_seen", "cards_skipped_known", "leads_reported",
+                        "leads_inserted"},
+    "cards": {"search_attempt_id", "seen_at", "outcome"},
+    "analyses": {"run_id", "api_lead_id", "started_at"},
+    "llm_calls": {"analysis_id", "started_at", "model", "attempts"},
+    "log_entries": {"run_id", "logged_at", "kind", "level", "logger"},
+}
 
 _JOB = {"id": "lead-1", "lead_search_id": "search-1", "business_name": "Ejemplo SL",
         "website": "https://ejemplo.es"}
 _SEARCH = {"id": "search-1", "profession": "fontaneros", "city": "Elche", "max_results": 5}
 _CARD = {"lead": "Abogados García", "website": "https://www.Ejemplo.es/contacto",
          "phone": "965123456", "address": "Calle Mayor 1", "city": "Elche"}
-
-
-def not_null_columns(table: str) -> set[str]:
-    """The columns the store refuses an INSERT without, read from the migration itself.
-
-    Read rather than restated: the point of the check is to fail when the schema gains a
-    NOT NULL column that the recorder's first fragment does not carry. ``id`` is left out
-    because it travels as the fragment's record_id, not among its fields.
-    """
-    body = re.search(rf"CREATE TABLE {table} \((.*?)\n\);", _MIGRATION.read_text(), re.S).group(1)
-    columns = {
-        line.split()[0] for raw in body.splitlines()
-        if (line := raw.strip()) and not line.startswith("--") and "NOT NULL" in line
-    }
-    return columns - {"id"}
 
 
 def fragments(box: Outbox, target: str) -> list[dict]:
@@ -64,7 +61,7 @@ def box(tmp_path):
 @pytest.fixture
 def started(box):
     """A run open on a temporary outbox, uploading nowhere."""
-    recorder.start(outbox=box, dsn="")
+    recorder.start(outbox=box)
     yield box
     recorder.stop("stopped")
 
@@ -97,14 +94,14 @@ class TestNoOpWithoutStart:
 # ── The first fragment is the INSERT ──────────────────────────────────────────
 
 class TestEveryRowCanBeInserted:
-    """A first fragment short of one NOT NULL column is a row Neon refuses outright.
+    """A first fragment short of one required column is a row the store refuses outright.
 
-    Checked against the migration, so a column added there without being added here
-    fails in the suite rather than as a refused fragment on a machine somewhere.
+    The fragments that follow carry only what they add, so whatever a row cannot be
+    created without has to be in the one that opens it.
     """
 
     def _assert_complete(self, box: Outbox, table: str) -> None:
-        missing = not_null_columns(table) - set(fragments(box, table)[0])
+        missing = REQUIRED_COLUMNS[table] - set(fragments(box, table)[0])
         assert not missing, f"the first fragment of {table} lacks {sorted(missing)}"
 
     def test_a_run(self, started):
@@ -134,17 +131,20 @@ class TestEveryRowCanBeInserted:
 
 
 class TestWhatTheRunSays:
-    def test_it_names_the_machine_the_environment_and_the_version(self, started):
+    def test_it_names_the_machine_and_the_version(self, started):
         run = fragments(started, "runs")[0]
         assert run["machine"] == socket.gethostname()
-        # The column's CHECK accepts exactly these two; anything else is a refused row.
-        assert run["environment"] in ("local", "production")
         assert run["worker_version"] == APP_VERSION
+
+    def test_it_says_nothing_about_which_environment_it_ran_against(self, started):
+        # Each API holds the audit of the worker that reports to it, so the environment
+        # is the database the row is in: recording it again could only disagree.
+        assert not {"environment", "api_base_url"} & set(fragments(started, "runs")[0])
 
     def test_timestamps_are_utc(self, started):
         # An aware datetime goes in, and the outbox stores it as ISO text — so what
-        # reaches Neon is the offset. Without it the store would read every timestamp
-        # in its own timezone, which is not the one the worker ran in.
+        # leaves is the offset. Without it the store would read every timestamp in its
+        # own timezone, which is not the one the worker ran in.
         assert recorder._utcnow().tzinfo is timezone.utc
         assert fragments(started, "runs")[0]["started_at"].endswith("+00:00")
 
@@ -153,6 +153,43 @@ class TestWhatTheRunSays:
         assert fragments(started, "runs")[-1] == {
             "ended_at": fragments(started, "runs")[-1]["ended_at"], "end_reason": "crashed",
         }
+
+
+class TestStoppingSurvivesASecondInterrupt:
+    """A run stopped on purpose must never be left looking like one that died.
+
+    What an open run with a stale heartbeat means is "the worker went away without
+    saying so", so a missing ``ended_at`` is not an absent answer but a wrong one.
+    """
+
+    def test_an_interrupt_during_the_closing_write_still_closes_the_run(self, started, monkeypatch):
+        # A second Ctrl+C, which is what an operator presses when stopping is not
+        # instant. The guard here used to be `except Exception`, and KeyboardInterrupt
+        # is not one, so the write was skipped and the interrupt went on its way.
+        real_put = started.put
+        attempts = []
+
+        def interrupted_once(target, record_id, fields):
+            attempts.append(target)
+            if len(attempts) == 1:
+                raise KeyboardInterrupt
+            return real_put(target, record_id, fields)
+
+        monkeypatch.setattr(started, "put", interrupted_once)
+
+        with pytest.raises(KeyboardInterrupt):
+            recorder.stop("stopped")
+
+        closing = fragments(started, "runs")[-1]
+        assert closing["end_reason"] == "stopped"
+        assert closing["ended_at"]
+
+    def test_the_interrupt_still_reaches_the_caller(self, started, monkeypatch):
+        # Recording the end is not a reason to swallow a stop: the worker is on its way
+        # out and the interrupt is what takes it there.
+        monkeypatch.setattr(started, "put", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt))
+        with pytest.raises(KeyboardInterrupt):
+            recorder.stop("stopped")
 
 
 # ── Liveness ──────────────────────────────────────────────────────────────────
@@ -253,7 +290,7 @@ class TestCards:
 
     def test_a_card_outside_a_search_records_nothing(self, started):
         # A card belongs to an attempt at a search: the column is NOT NULL, so a row
-        # without one is a row Neon refuses.
+        # without one is a row the store refuses.
         recorder.card_reported(_CARD)
         recorder.card_skipped_known("ejemplo.es")
         assert fragments(started, "cards") == []
@@ -326,7 +363,7 @@ class TestNothingReachesTheCaller:
 
         monkeypatch.setattr(box, "put", explode)
         with caplog.at_level(logging.WARNING, logger="audit"):
-            assert recorder.start(outbox=box, dsn="") is None
+            assert recorder.start(outbox=box) is None
 
         recorder.search_started(_SEARCH)  # must not raise
         assert recorder.current_search_attempt_id() is None

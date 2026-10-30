@@ -9,6 +9,11 @@ The first fragment of a row is its INSERT, so it carries every NOT NULL column o
 table — the ones with a default included, to keep the rule free of exceptions somebody has
 to remember. Later fragments carry only what they add.
 
+Fragments are written to the local outbox and stay there. They are destined for
+SegurSEO-API, which has no endpoint for them yet, so ``_start_upload`` and ``_stop_upload``
+are the two places that will learn to send them and the only ones that will change when
+they do.
+
 Nothing here raises at the worker. A failure to record is a warning under the "audit"
 logger hierarchy and nothing else: a lead must never be reported as failed because its
 audit row could not be written.
@@ -21,13 +26,15 @@ import hashlib
 import logging
 import socket
 import time
+import traceback
 import uuid
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
 
+from audit.log_handler import AuditLogHandler
 from audit.outbox import Outbox
-from config import API_BASE_URL, APP_VERSION, AUDIT_DATABASE_URL, ENVIRONMENT
+from config import APP_VERSION
 from scraper.card_issues import maps_card_issues
 from scraper.domains import normalize_domain
 
@@ -38,12 +45,8 @@ logger = logging.getLogger(__name__)
 # POLL_INTERVAL seconds, and a fragment on each would be traffic rather than information.
 HEARTBEAT_INTERVAL = 30.0
 
-# What stop() gives the sync thread to finish the upload before the rest is left for the
-# next run. The worker is on its way out; this is a courtesy, not a guarantee.
-_STOP_TIMEOUT = 10.0
-
-# Constants rather than a validated argument: log_entries.kind has a CHECK, so a typo
-# would surface as a fragment Neon refuses hours later instead of a name that is not here.
+# Constants rather than a validated argument: log_entries.kind is a constrained column, so
+# a typo would surface as a row the API refuses later instead of a name that is not here.
 PAUSE_RATE_LIMIT = "pause_rate_limit"
 PAUSE_PAYMENT = "pause_payment"
 
@@ -53,9 +56,9 @@ _PAUSE_MESSAGES = {
 }
 
 _outbox: Outbox | None = None
-_syncer = None
 _run_id: str | None = None
 _last_heartbeat = 0.0
+_log_handler: AuditLogHandler | None = None
 
 # The run is module state because there is one per process; the work in progress is not,
 # because the tasks that come next — the log handler, and the generator's llm_calls — read
@@ -97,13 +100,14 @@ def _guarded(fn):
 
 # ── The run ───────────────────────────────────────────────────────────────────
 
-def start(outbox: Outbox | None = None, dsn: str | None = None) -> str | None:
-    """Open a run and begin uploading in the background.
+def start(outbox: Outbox | None = None) -> str | None:
+    """Open a run and start filing what the worker does under it.
+
+    There is one environment per API, so the run says which machine it ran on and which
+    version of the worker it was — the API it reported to is the one holding the record.
 
     Args:
         outbox: Where fragments are written; this machine's own outbox when omitted.
-        dsn: The shared store to drain into; AUDIT_DATABASE_URL when omitted. Empty means
-            everything stays in the local file, which is a working configuration.
 
     Returns:
         The run id, or None when the run could not be opened — in which case every other
@@ -119,14 +123,13 @@ def start(outbox: Outbox | None = None, dsn: str | None = None) -> str | None:
         now = _utcnow()
         box.put("runs", run_id, {
             "machine": socket.gethostname(),
-            "environment": ENVIRONMENT,
-            "api_base_url": API_BASE_URL,
             "worker_version": APP_VERSION,
             "started_at": now,
             "last_seen_at": now,
         })
         _outbox, _run_id, _last_heartbeat = box, run_id, time.monotonic()
-        _start_syncer(AUDIT_DATABASE_URL if dsn is None else dsn)
+        _install_log_handler()
+        _start_upload(box)
         return run_id
     except Exception:
         logger.warning("Could not open the audit run; this run is not audited", exc_info=True)
@@ -134,26 +137,23 @@ def start(outbox: Outbox | None = None, dsn: str | None = None) -> str | None:
         return None
 
 
-def _start_syncer(dsn: str) -> None:
-    """Start draining the outbox, if there is anywhere to drain it to.
+# ── Sending it on ─────────────────────────────────────────────────────────────
+#
+# Nothing is uploaded yet. The fragments accumulate in the local outbox, which already
+# keeps the three states an uploader needs — pending, sent, refused — and they are bound
+# for SegurSEO-API: each API holds the audit of the worker that reports to it, so a local
+# run is recorded locally and a production run in production.
+#
+# These two are where that goes, and the only part of the recorder that changes when the
+# endpoint exists. Deliberately no contract yet: what the request looks like is for the
+# commit that can test it against the real thing.
 
-    Imported here rather than at module scope so psycopg is only needed by a machine that
-    has a DSN: without one the audit is a local file and nothing else. A sync that cannot
-    start leaves the run recording locally — which is the whole point of the outbox.
-    """
-    global _syncer
-    if not dsn:
-        return
-    try:
-        from audit.sync import Syncer
+def _start_upload(outbox: Outbox) -> None:
+    """Begin sending fragments to the API. Does nothing until that endpoint exists."""
 
-        _syncer = Syncer(_outbox, dsn)
-        _syncer.start()
-    except Exception:
-        logger.warning(
-            "Could not start the audit sync; records stay in the local outbox", exc_info=True,
-        )
-        _syncer = None
+
+def _stop_upload() -> None:
+    """Send what is left before the worker goes. Does nothing until that endpoint exists."""
 
 
 @_guarded
@@ -168,31 +168,113 @@ def heartbeat() -> None:
 
 
 def stop(end_reason: str) -> int:
-    """Close the run, drain what the time allows, and say what is left.
+    """Close the run and say how much of it is still waiting to be sent.
+
+    The closing fragment is written first and shielded from ``BaseException``, not from
+    ``Exception``, and that is the guard that matters: a second Ctrl+C — which is what an
+    operator presses when stopping is not instant — landed in this function and left the
+    run with no ``ended_at``, which is precisely how the audit records a worker that
+    *died*. A run stopped on purpose and filed as a crash is a wrong answer, not a
+    missing one. The interrupt still leaves, because stopping is what was asked for; it
+    just no longer takes the record with it.
 
     Args:
         end_reason: 'stopped' when the operator asked for it, 'crashed' otherwise.
 
     Returns:
-        How many fragments are still waiting to go up — they travel with the next run —
-        0 when there is nothing to report, or -1 when the outbox could not be counted.
+        How many fragments are still in the local outbox — they travel with the next run
+        — 0 when there is nothing to report, or -1 when the outbox could not be counted.
     """
-    global _outbox, _syncer, _run_id
+    global _outbox, _run_id
     if _run_id is None:
         return 0
 
+    outbox, run_id = _outbox, _run_id
+    closing = {"ended_at": _utcnow(), "end_reason": end_reason}
+
+    def write_closing() -> bool:
+        """Write the fragment, answering a broken outbox the way everything here does."""
+        try:
+            outbox.put("runs", run_id, closing)
+            return True
+        except Exception:
+            logger.warning("Could not close the audit run", exc_info=True)
+            return False
+
+    closed = False
     try:
-        _outbox.put("runs", _run_id, {"ended_at": _utcnow(), "end_reason": end_reason})
-        return _syncer.stop(timeout=_STOP_TIMEOUT) if _syncer else _outbox.pending_count()
-    except Exception:
-        logger.warning("Could not close the audit run", exc_info=True)
-        return -1
+        try:
+            closed = write_closing()
+        except BaseException:
+            # Nothing but an interrupt reaches this: an ordinary failure is already
+            # answered with False. Written once more and then let through — a duplicate
+            # closing fragment says the same thing twice, a missing one says the worker
+            # never came back.
+            write_closing()
+            raise
     finally:
-        _outbox, _syncer, _run_id = None, None, None
+        _remove_log_handler()
+        _outbox, _run_id = None, None
         _search_attempt_id.set(None)
         _analysis_id.set(None)
         _analysis_clock.set(None)
         _llm_call_id.set(None)
+
+    _stop_upload()
+    if not closed:
+        return -1
+    try:
+        return outbox.pending_count()
+    except Exception:
+        logger.warning("Could not count what the audit has left to send", exc_info=True)
+        return -1
+
+
+# ── Warnings and errors ───────────────────────────────────────────────────────
+
+def _record_log(record: logging.LogRecord) -> None:
+    """File one log record as a row, under whatever work was in hand when it was logged.
+
+    The run is module state, so it is visible from any thread. The search attempt and the
+    analysis are context variables, and a thread does not inherit the context of the one
+    that started it: a record logged from a thread the worker spawned carries no work ids
+    and is filed under the run alone. That is the honest answer — better than guessing an
+    analysis — and it is why a record can never be attached to the wrong lead.
+    """
+    if _run_id is None or _outbox is None:
+        return
+
+    fields = {
+        "run_id": _run_id,
+        "logged_at": _utcnow(),
+        "kind": "log",
+        "level": record.levelname,
+        "logger": record.name,
+        "search_attempt_id": _search_attempt_id.get(),
+        "analysis_id": _analysis_id.get(),
+        "message": record.getMessage(),
+    }
+    if record.exc_info and record.exc_info[0] is not None:
+        fields["exception_type"] = record.exc_info[0].__name__
+        fields["exception_text"] = "".join(traceback.format_exception(*record.exc_info))
+    _outbox.put("log_entries", str(uuid.uuid4()), fields)
+
+
+def _install_log_handler() -> None:
+    """Put the audit on the root logger, once per run."""
+    global _log_handler
+    if _log_handler is not None:
+        return
+    _log_handler = AuditLogHandler(_record_log)
+    logging.getLogger().addHandler(_log_handler)
+
+
+def _remove_log_handler() -> None:
+    global _log_handler
+    if _log_handler is None:
+        return
+    logging.getLogger().removeHandler(_log_handler)
+    _log_handler = None
 
 
 # ── Work in progress ──────────────────────────────────────────────────────────

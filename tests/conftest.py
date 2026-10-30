@@ -23,19 +23,20 @@ def make_soup(html: str) -> BeautifulSoup:
 
 @pytest.fixture(autouse=True)
 def audit_stays_in_the_test(tmp_path, monkeypatch):
-    """Keep every test's audit in a temporary outbox and off the network.
+    """Keep every test's audit inside the test: a temporary outbox and no leftover state.
 
     ``worker.main()`` opens an audit run, so without this any test that reaches it wrote
-    into the developer's own outbox and opened a connection to the real Neon store — a
-    .env with AUDIT_DATABASE_URL set is the normal case, and load_dotenv(override=True)
-    means the suite reads it. The module state is restored after each test, so a run left
-    open by one cannot record into the next.
+    into the developer's own outbox. The module state is restored after each test, so a
+    run left open by one cannot record into the next, and the log handler one test
+    installs on the root logger cannot outlive it.
     """
     monkeypatch.setenv("AUDIT_OUTBOX_PATH", str(tmp_path / "outbox.sqlite"))
-    monkeypatch.setattr(recorder, "AUDIT_DATABASE_URL", "")
     monkeypatch.setattr(recorder, "_outbox", None)
-    monkeypatch.setattr(recorder, "_syncer", None)
     monkeypatch.setattr(recorder, "_run_id", None)
+    monkeypatch.setattr(recorder, "_log_handler", None)
+    yield
+    # The handler is held by the root logger, which no fixture restores.
+    recorder._remove_log_handler()
 
 
 @pytest.fixture
