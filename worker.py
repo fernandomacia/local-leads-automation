@@ -653,14 +653,13 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
     return False
 
 
-def _audit_stopped(end_reason: str) -> None:
-    """Close the audit run, and say what it could not upload before the worker went away.
+def _say_pending(pending: int) -> None:
+    """Say what the audit could not send before the worker went away.
 
-    Records left in the outbox are not lost — the next run drains them before it starts
-    on its own — but they are not in the store yet, and the line is what stops somebody
-    looking for a run that is still on this machine.
+    Records left in the outbox are not lost — they travel with the next run — but they
+    are not in the store either, and the line is what stops somebody looking for a run
+    that is still sitting on this machine.
     """
-    pending = recorder.stop(end_reason)
     if pending > 0:
         print(f"[i] {_plural(pending, 'audit record')} still local — they go up on the next run")
 
@@ -690,9 +689,6 @@ def main() -> None:
     # being handed back. Printing the advice there would be printing the wrong advice.
     if sys.stdout.isatty():
         print("[i] Ctrl+C to stop — the job in hand is handed back to the queue")
-    # After the lines above, so the audit never delays what the operator is waiting to
-    # read, and after the env file has been chosen, which is what names the environment.
-    recorder.start()
     analysis_idx = 0
     # Keyed by search id, so the closing block can name what each count belongs to;
     # emptied once its line is printed. See _analysis_done_lines.
@@ -700,6 +696,10 @@ def main() -> None:
     was_analyzing = False
 
     try:
+        # Opened inside the handlers' reach, and after the lines above so the audit never
+        # delays what the operator is waiting to read. An interrupt during startup used
+        # to land outside both handlers and leave a run open with nobody to close it.
+        recorder.start()
         while True:
             try:
                 if job := claim_next_analysis_job():
@@ -764,14 +764,20 @@ def main() -> None:
         # The job in hand, if any, has already released itself on the way out. The counts
         # of everything analysed before it are still worth printing: an interrupted run is
         # the normal way to stop one, and discarding them left no record of what it did.
+        #
+        # The run is closed before any of it is printed. A second Ctrl+C — what an
+        # operator presses when stopping is not instant — used to land between the line
+        # and the record, so the worker said it had stopped and the audit said it had
+        # died. Nothing printed here changes; only the order it happens in.
+        pending = recorder.stop("stopped")
         closing = f"{_analysis_done_lines(searches)}\n" if was_analyzing else ""
         _finish(f"{closing}[+] Worker stopped")
-        _audit_stopped("stopped")
+        _say_pending(pending)
     except Exception:
-        # The audit is closed on the way out rather than left to look like a run that
-        # died: a crash is a fact about this run, and it is the one the store cannot
-        # infer for itself. Re-raised untouched — the traceback is the point.
-        _audit_stopped("crashed")
+        # Closed on the way out rather than left to look like a run that died: a crash is
+        # a fact about this run, and the one thing the store cannot infer for itself.
+        # Re-raised untouched — the traceback is the point.
+        _say_pending(recorder.stop("crashed"))
         raise
 
 

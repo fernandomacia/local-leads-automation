@@ -44,8 +44,7 @@ api/
 audit/
   recorder.py                # What the worker did, as domain events: runs, searches, analyses
   outbox.py                  # Local SQLite buffer of audit fragments; never raises on put()
-  sync.py                    # Drains the outbox into Neon from a background thread
-  migrations/                # SQL for the shared audit store (Neon Postgres)
+  log_handler.py             # Files the worker's WARNING and ERROR records with the audit
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
 env_select.py                # Asks which env file to load, before config.py reads one
 ```
@@ -313,19 +312,26 @@ def analyze_website(url: str) -> dict:
   row could not be written is a worse outcome than no audit at all. Failures are logged
   under the `audit` hierarchy, which the log handler leaves out so a broken outbox cannot
   feed on its own warnings.
-- **Three layers, one direction.** `recorder` turns what the worker did into rows, in the
-  worker's vocabulary — `worker.py` names no table and no column; `outbox` buffers them as
-  fragments in one SQLite file per machine; `sync` drains them into Neon from a background
-  thread. Without `AUDIT_DATABASE_URL` the first two work and the third never starts, which
-  is a working configuration and the one a fresh checkout has.
+- **Two layers, and a third that is not built yet.** `recorder` turns what the worker did
+  into rows, in the worker's vocabulary — `worker.py` names no table and no column; `outbox`
+  buffers them as fragments in one SQLite file per machine. Nothing sends them anywhere yet:
+  they are bound for SegurSEO-API, which has no endpoint for them, and `_start_upload` /
+  `_stop_upload` in the recorder are the only two places that change when it does. The
+  outbox already keeps the three states that uploader will need — pending, sent, refused.
+- **The audit goes where the leads went.** Each API holds the audit of the worker that
+  reports to it, so a local run is recorded locally and a production run in production.
+  That is why a run says which machine and which worker version, and nothing about which
+  environment: the environment is the database the row is in, and recording it again could
+  only disagree.
 - **Without `recorder.start()` every function is a no-op**, so the tests and any other entry
   point are unaffected by the audit existing. `main()` is what starts it, after the env file
-  has been chosen: that file is what names `ENVIRONMENT`, which the store's CHECK accepts as
-  exactly `local` or `production`.
-- **The first fragment of a row is its INSERT**, so it carries every NOT NULL column of its
-  table, the ones with a default included; later fragments carry only what they add. One
-  missing is a row Neon refuses outright, so `tests/test_audit_recorder.py` checks the first
-  fragments against the migration itself rather than against a restated list.
+  has been chosen, and inside the reach of the handlers that close it — a run that was
+  opened is always closed.
+- **The first fragment of a row is its INSERT**, so it carries everything the row cannot be
+  created without; later fragments carry only what they add. One missing is a row the store
+  refuses outright. The tables live in SegurSEO-API now, so `REQUIRED_COLUMNS` in
+  `tests/test_audit_recorder.py` is the worker's side of a contract it cannot read: a column
+  the API makes required has to be added there by hand.
 - **A card dropped for a domain the system already has is recorded through the predicate**,
   wrapped in `worker.py`. The scrape yields only the cards it keeps, so that answer is the
   one place a dropped card is visible, and the scraper stays unaware the audit exists. It
@@ -358,9 +364,31 @@ def analyze_website(url: str) -> dict:
 - **`system_prompt_sha256` outlives the prompt it hashes**, which is why it is there: the
   text is content and is cleared after 90 days, so the hash is what still answers which
   version of the prompt produced a given pitch.
+- **Warnings and errors are filed by a handler, not by the code that logs them.**
+  `AuditLogHandler` goes on the root logger — the one place records from the scraper, the
+  analyzer, the compliance package and the API client all arrive — so none of them knows
+  the audit exists, and the worker's console output is unchanged: it adds a destination
+  and replaces none. `start()` installs it once, `stop()` removes it. The `audit`
+  hierarchy is skipped, or a broken outbox would feed on itself: a failed write logs a
+  warning, which is a record, which is another failed write. `emit()` swallows its own
+  failures rather than calling `handleError()`, which prints to the stderr an operator is
+  reading a run on.
+- **A record carries the work its own context can see.** The run is module state, so it is
+  visible from any thread; the search attempt and the analysis are context variables, and
+  a thread starts with an empty context rather than a copy of its parent's. So a warning
+  logged from a thread the worker spawned is filed under the run alone. That is the honest
+  answer — a record attached to the wrong lead would be worse than one attached to none.
+- **The closing fragment is written before anything is printed, and shielded from
+  `BaseException`.** A real run printed `[+] Worker stopped` and left no `ended_at`: the
+  guard was `except Exception`, and a second Ctrl+C — what an operator presses when
+  stopping is not instant — is not one. An open run with a stale heartbeat is how the
+  audit records a worker that *died*, so a missing `ended_at` is a wrong answer, not an
+  absent one. `recorder.start()` sits inside the same handlers' reach for the mirror
+  reason: a run that was opened is always closed.
 - **The suite keeps its own audit local.** `conftest.py` points `AUDIT_OUTBOX_PATH` at
-  `tmp_path` and blanks the DSN for every test: `main()` opens a run, so without that the
-  tests wrote into the developer's own outbox and opened a connection to the real store.
+  `tmp_path` for every test and resets the recorder's module state afterwards: `main()`
+  opens a run, so without that the tests wrote into the developer's own outbox, and a log
+  handler left on the root logger would outlive the test that installed it.
 
 ### Compliance auditing
 - Bias is asymmetric on purpose: a false positive is read out loud to a business

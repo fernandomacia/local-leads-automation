@@ -1160,6 +1160,22 @@ class TestTheRunItself:
         self._loop(audit)
         audit.stop.assert_called_once_with("stopped")
 
+    def test_the_run_is_closed_before_the_stop_is_announced(self, audit):
+        # The run this came from: the worker printed "[+] Worker stopped" and the audit
+        # was left with no ended_at, which reads as a worker that died. A second Ctrl+C
+        # landed between the line and the record, so the record goes first now.
+        with pytest.raises(KeyboardInterrupt):
+            self._loop(audit, **{"worker._finish": {"side_effect": KeyboardInterrupt}})
+
+        audit.stop.assert_called_once_with("stopped")
+
+    def test_a_run_opened_is_a_run_closed(self, audit):
+        # start() used to sit outside the handlers, so an interrupt while the audit was
+        # opening left a run nothing would ever close.
+        audit.start.side_effect = KeyboardInterrupt
+        self._loop(audit)
+        audit.stop.assert_called_once_with("stopped")
+
     def test_records_left_behind_are_said_out_loud(self, audit):
         # They are not lost — the next run drains them — but they are not in the store
         # yet, which is what stops somebody looking for a run still on this machine.
