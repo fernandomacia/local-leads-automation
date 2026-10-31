@@ -11,7 +11,7 @@ worker requirements to.
 > phases in `CLAUDE.md`. Rebuilding those entries from them now would read tidier than the
 > history actually was, which is the one thing a changelog cannot afford.
 
-## [Unreleased]
+## [2.10.0] - 2026-10-31
 
 ### Added
 
@@ -46,8 +46,63 @@ worker requirements to.
   records already sent are cleared after seven days and refused ones after thirty, because
   those are the ones somebody will want to read.
 
-  **Nothing is sent anywhere yet.** The destination is SegurSEO-API, which has no endpoint
-  for this: each API will hold the audit of the worker that reports to it, so a local run is
-  recorded locally and a production run in production. Until that exists the fragments
-  simply accumulate, which is why the outbox already draws the distinction an uploader
-  needs.
+  **One file per API, not just per machine.** Each API holds the audit of the worker that
+  reports to it, so a local run is recorded locally and a production run in production — and
+  the fragments of a run against one API can only ever be sent to that one, because a search
+  attempt names a `lead_search_id` the other has never heard of. The name says which:
+  `outbox-127.0.0.1-8000.sqlite`, `outbox-platform.segurseo.com.sqlite`. The old single
+  `outbox.sqlite` is simply no longer read; it is neither migrated nor deleted, because
+  nothing can say which API its fragments were written against, which is the whole reason
+  this changed.
+
+- **The audit is sent to the API.** A daemon thread drains the local outbox to
+  `POST /api/scraper/audit/fragments`, in `seq` order, with the same bearer token as the
+  rest of the worker's calls. **Requires SegurSEO-API 13.4.0 or newer**, which is where that
+  endpoint exists; against an older API the request 404s and the fragments stay pending,
+  which is exactly what the outbox is for.
+
+  Batches are capped at 200 fragments and 450 KB — under the API's 512 KB, because the
+  request that arrives also carries the envelope and the headers, so sending right up to
+  the limit would earn a 413 for a batch that looked fine from here. A fragment over the
+  limit on its own can never be sent and is marked failed locally with that reason.
+
+  **Nothing is marked unless the API said something about that fragment.** A 401, a 422, a
+  429, a 500, a timeout, a body the worker cannot read and a `seq` the response left out are
+  all "ask again later": the fragments stay pending and travel with the next run. Only an
+  `accepted` or a `rejected` takes one out of the queue, and a rejection keeps its reason in
+  the outbox. A 401 or a 422 waits five minutes and says so once per streak rather than once
+  per attempt — the first needs a token fixed and the second is a bug in this worker, and
+  neither is helped by hammering the endpoint.
+
+  `stop()` joins the thread and then empties what is left itself, so two threads are never
+  draining at once, and reports what is still pending — which is the number the worker
+  already printed on its way out.
+
+- **A test module carrying the API's audit contract.** The tables, their columns, the types,
+  the values each CHECK allows and what every row cannot be created without, written out on
+  this side and held against every fragment the recorder emits. The API answers a fragment
+  it cannot accept with a `rejected` inside a 200, recorded in a local outbox nothing reads,
+  so without this a recorder that sent `"3"` where an integer goes would lose that row
+  silently, hours after the run that produced it.
+
+### Changed
+
+
+- **The fragments match the API's column names**: `api_search_id` is `lead_search_id` and
+  `api_lead_id` is `lead_id`, on the tables that carry them.
+- **A recorded card now carries its `maps_url`**, and it is not one more detail among the
+  rest: it is the only thing tying a card to the lead it became, because the card is
+  recorded before that lead exists and carries no lead id. The API matches on it to empty a
+  card's content when its lead is deleted, so a card stored without it was personal data
+  that erasure could not reach.
+- **Every value is of the type the API types its column as.** `"3"` is not an integer there
+  and `1` is not a boolean, and three of the sources the recorder reads are outside this
+  worker's control: the job dicts the API hands back, the scraped card, and OpenRouter's
+  `usage` block, which sends token counts as JSON numbers and has been seen to send `cost`
+  as a string. Each one is coerced on the way in, and a value that cannot be read is dropped
+  on its own rather than costing the fragment that carries it.
+- **A job whose id is not a UUID records nothing for that row.** `search_attempts.lead_search_id`
+  and `analyses.lead_id` are resolved by the API against its own rows, so such a row can
+  only ever come back rejected; queueing one would fill the outbox with fragments that are
+  refused one request at a time.
+

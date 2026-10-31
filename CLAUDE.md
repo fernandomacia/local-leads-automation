@@ -43,7 +43,8 @@ api/
   client.py                  # SegurSEO-API job-queue client: every call through one _request()
 audit/
   recorder.py                # What the worker did, as domain events: runs, searches, analyses
-  outbox.py                  # Local SQLite buffer of audit fragments; never raises on put()
+  outbox.py                  # Local SQLite buffer of audit fragments, one file per API
+  upload.py                  # Drains the outbox to the API on a daemon thread
   log_handler.py             # Files the worker's WARNING and ERROR records with the audit
 config.py                    # Constants and configuration (scraper, OpenRouter, sender identity, API worker)
 env_select.py                # Asks which env file to load, before config.py reads one
@@ -312,12 +313,63 @@ def analyze_website(url: str) -> dict:
   row could not be written is a worse outcome than no audit at all. Failures are logged
   under the `audit` hierarchy, which the log handler leaves out so a broken outbox cannot
   feed on its own warnings.
-- **Two layers, and a third that is not built yet.** `recorder` turns what the worker did
-  into rows, in the worker's vocabulary — `worker.py` names no table and no column; `outbox`
-  buffers them as fragments in one SQLite file per machine. Nothing sends them anywhere yet:
-  they are bound for SegurSEO-API, which has no endpoint for them, and `_start_upload` /
-  `_stop_upload` in the recorder are the only two places that change when it does. The
-  outbox already keeps the three states that uploader will need — pending, sent, refused.
+- **Three layers.** `recorder` turns what the worker did into rows, in the worker's
+  vocabulary — `worker.py` names no table and no column; `outbox` buffers them as fragments
+  in SQLite; `upload` drains that to SegurSEO-API on a daemon thread. `_start_upload` /
+  `_stop_upload` in the recorder are the seam, so `worker.py` talks to the recorder and
+  nothing else.
+- **One outbox file per API, and that is a correctness rule rather than tidiness.** The file
+  is per machine *and* per API — `outbox-127.0.0.1-8000.sqlite`,
+  `outbox-platform.segurseo.com.sqlite` — because a fragment written against one API can
+  only be sent to that one: a search attempt names a `lead_search_id` the other has never
+  heard of. The failure it really prevents is the asymmetric one: a local run left with
+  fragments pending, uploaded into **production** the next time the worker is started
+  against it. `AUDIT_OUTBOX_PATH` still overrides. The old single `outbox.sqlite` is simply
+  no longer read, and is neither migrated nor deleted: nothing can say which API its
+  fragments were written against, which is the whole reason this changed.
+- **Nothing is marked sent unless the API said something about that fragment.** A 401, a
+  422, a 429, a 500, a timeout, a body the worker cannot read and a `seq` the response left
+  out are all "ask again later" — the fragments stay pending and travel with the next run.
+  Only an `accepted` or a `rejected` takes one out of the queue. Guessing "accepted" on a
+  missing result would lose the row silently, which is the one outcome the module exists to
+  avoid; guessing "rejected" would throw away a row the API may well have taken.
+- **A 401 and a 422 wait rather than retry, and say so once per streak.** The first needs a
+  token fixed and the second is a bug in this worker, and neither is helped by hammering the
+  endpoint — nor by 720 identical lines in the log nobody is watching. **A 422 is an ERROR
+  here and still marks nothing**: no data is lost while the bug is being fixed.
+- **The batch is capped under the API's cap**, 450 KB against its 512 KB, because what is
+  measured locally is the fragment list and the request that arrives also carries the
+  envelope and the headers. A fragment over the limit on its own can never be sent and is
+  marked failed locally; one that merely does not fit in what is left of a batch goes in the
+  next one, because some batch can carry it.
+- **`stop()` joins the thread before flushing what is left.** Two threads draining at once
+  would each mark fragments the other had in flight — not a shared-connection problem, the
+  outbox opens one per operation, but a double-send. A thread still inside a request after
+  the join is left alone and its fragments stay pending, which is what pending has always
+  meant.
+- **`audit/upload.py` imports no configuration.** The base URL and the token arrive as
+  arguments, through `recorder.start()`, from `worker.py`: the package knows nothing about
+  where the worker is pointed, and the base URL is also what decides which outbox is opened.
+- **The API's contract is copied into `tests/test_audit_contract.py`** — the tables, the
+  columns, their types, the values each CHECK allows, and what each row cannot be created
+  without — and held against every fragment every recorder function emits. It has to be
+  copied because the worker cannot read SegurSEO-API's `AuditTable`, and it has to exist
+  because a fragment the API refuses comes back as a `rejected` inside a 200, recorded in a
+  local outbox nothing reads: a recorder sending `"3"` where an integer goes would lose that
+  row silently, hours after the run. A column the API adds, renames or retypes is changed
+  there by hand. `REQUIRED_COLUMNS` in `tests/test_audit_recorder.py` is the same idea on
+  the narrow question of what opens a row.
+- **Types are the API's, strictly: `"3"` is not an integer and `1` is not a boolean.** Three
+  of the recorder's sources are outside this worker — the job dicts the API hands back, the
+  scraped card, and OpenRouter's `usage` block, which sends token counts as JSON numbers and
+  has been seen to send `cost` as a string — so each value is coerced on the way in and one
+  that cannot be read is dropped on its own rather than costing the fragment. Timestamps
+  carry their offset; the API refuses one without.
+- **A job whose id is not a UUID records nothing for that row.**
+  `search_attempts.lead_search_id` and `analyses.lead_id` are resolved by the API against
+  its own rows, so such a row can only ever come back rejected — and queueing it would fill
+  the outbox with fragments refused one request at a time. A `lead_search_id` on an analysis
+  is nullable, so an unusable one is dropped without costing the analysis.
 - **The audit goes where the leads went.** Each API holds the audit of the worker that
   reports to it, so a local run is recorded locally and a production run in production.
   That is why a run says which machine and which worker version, and nothing about which
@@ -337,6 +389,11 @@ def analyze_website(url: str) -> dict:
   one place a dropped card is visible, and the scraper stays unaware the audit exists. It
   is asked at most once per card, so every `True` is one card — deduplicating by domain
   would lose the second of two branches sharing one website.
+- **`cards.maps_url` is what erasure is reached by**, which is why it is recorded even
+  though the ingest reports it too. A card is recorded *before* the lead it becomes exists,
+  so it carries no lead id and never will; `maps_url` is the only thing tying the two
+  together, and the API matches on it to empty a card's content when its lead is deleted. A
+  card stored without it is personal data the erasure cannot reach.
 - **`cards.maps_issues` is the only card data that outlives the purge**, which is why it
   is recorded even though the ingest reports it too. `purge_audit_content()` clears `raw`,
   the name, the website, the phone and the address after 90 days and leaves the findings
@@ -385,8 +442,10 @@ def analyze_website(url: str) -> dict:
   audit records a worker that *died*, so a missing `ended_at` is a wrong answer, not an
   absent one. `recorder.start()` sits inside the same handlers' reach for the mirror
   reason: a run that was opened is always closed.
-- **The suite keeps its own audit local.** `conftest.py` points `AUDIT_OUTBOX_PATH` at
-  `tmp_path` for every test and resets the recorder's module state afterwards: `main()`
+- **The suite keeps its own audit local, and sends nothing.** `conftest.py` points
+  `AUDIT_OUTBOX_PATH` at `tmp_path` for every test and resets the recorder's module state
+  afterwards; `recorder.start()` without a base URL starts no uploader, and the uploader's
+  own tests inject a fake session, so no test reaches the network or a real outbox: `main()`
   opens a run, so without that the tests wrote into the developer's own outbox, and a log
   handler left on the root logger would outlive the test that installed it.
 

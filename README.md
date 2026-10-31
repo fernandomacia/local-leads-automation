@@ -297,6 +297,9 @@ worker.py                    # Daemon: polls SegurSEO-API job queues, drives scr
 scraper/
   maps_scraper.py            # Scrapes businesses from Google Maps
   web_analyzer.py            # CMS detection, contacts, SEO scoring
+  card_issues.py             # What a Maps card is missing (pure, no browser)
+  domains.py                 # normalize_domain(): the hostname the API stores
+  social.py                  # identify_platform(): which network a URL belongs to
   net_guard.py               # SSRF guard shared by every fetch and the browser
   compliance/                # Legal compliance audit (LSSI, GDPR, cookies)
     __init__.py              # detect_compliance(): orchestration, issue labels
@@ -312,6 +315,11 @@ ai/
   message_generator.py       # Generates the phone argumentario via OpenRouter
 api/
   client.py                  # SegurSEO-API job-queue client (used by worker.py)
+audit/
+  recorder.py                # What the worker did: runs, searches, cards, analyses, LLM calls
+  outbox.py                  # Local SQLite buffer of audit fragments, one file per API
+  upload.py                  # Drains the outbox to the API on a daemon thread
+  log_handler.py             # Files the worker's WARNING and ERROR records with the audit
 config.py                    # Scraper, OpenRouter, sender, and API worker configuration
 env_select.py                # Asks which API to use, before config.py loads anything
 .env                         # Secrets (do not commit)
@@ -329,6 +337,11 @@ combinations are recorded — the Compatibility table in `SegurSEO-API/README.md
   as new as itself; 2.9.0 is the first that degrades instead of requiring, and runs against
   13.2.x with one feature dark. Either way those API releases accepted the older input too,
   so the gap stays short and one-sided in that direction only.
+- **2.10.0 needs API 13.4.0 or newer**, which is where `POST /api/scraper/audit/fragments`
+  exists. It degrades rather than failing: against an older API the request 404s, the
+  uploader backs off and the fragments stay in the local outbox, which is what the outbox is
+  for — they go up whenever the API catches up. Everything else the worker does is
+  unaffected, because the audit never blocks a run.
 - **`APP_VERSION` is the contract**, not a label: it is what that table keys its
   requirements to, so a change to what this worker sends or reads bumps it.
 
