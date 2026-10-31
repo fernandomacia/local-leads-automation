@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from audit.outbox import Outbox, default_path
+from audit.outbox import api_slug, Outbox, default_path
 
 
 @pytest.fixture
@@ -100,21 +100,94 @@ class TestSyncBookkeeping:
 
 
 class TestDefaultPath:
+    """Where the outbox lives, and why there is one of them per API.
+
+    The file is per machine *and* per API. Fragments written against one API can only be
+    sent to that one — a search attempt names a `lead_search_id` the other has never heard
+    of — and the failure the separation really prevents is the asymmetric one: a local run
+    left with fragments pending, uploaded into production the next time the worker is
+    started against it.
+    """
+
     def test_the_override_wins(self, monkeypatch, tmp_path):
         monkeypatch.setenv("AUDIT_OUTBOX_PATH", str(tmp_path / "x.sqlite"))
-        assert default_path() == tmp_path / "x.sqlite"
+        # Even with an API named, which is what makes it an override rather than a default.
+        assert default_path("https://platform.segurseo.com") == tmp_path / "x.sqlite"
 
     def test_linux_follows_xdg(self, monkeypatch, tmp_path):
         monkeypatch.delenv("AUDIT_OUTBOX_PATH", raising=False)
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-        assert default_path() == tmp_path / "local-leads-automation" / "outbox.sqlite"
+        assert default_path("http://127.0.0.1:8000") == (
+            tmp_path / "local-leads-automation" / "outbox-127.0.0.1-8000.sqlite"
+        )
 
     def test_windows_uses_local_app_data(self, monkeypatch, tmp_path):
         monkeypatch.delenv("AUDIT_OUTBOX_PATH", raising=False)
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-        assert default_path() == tmp_path / "local-leads-automation" / "outbox.sqlite"
+        assert default_path("http://127.0.0.1:8000") == (
+            tmp_path / "local-leads-automation" / "outbox-127.0.0.1-8000.sqlite"
+        )
+
+    def test_the_local_api_and_production_never_share_a_file(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("AUDIT_OUTBOX_PATH", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+        local = default_path("http://127.0.0.1:8000")
+        production = default_path("https://platform.segurseo.com")
+
+        assert local != production
+        assert local.name == "outbox-127.0.0.1-8000.sqlite"
+        assert production.name == "outbox-platform.segurseo.com.sqlite"
+        # Same directory as always: what changed is the file, not where it lives.
+        assert local.parent == production.parent
+
+    # Two local APIs on one machine are two stores, so the port has to be in the name.
+    def test_the_port_distinguishes_two_local_apis(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("AUDIT_OUTBOX_PATH", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+
+        assert default_path("http://127.0.0.1:8000") != default_path("http://127.0.0.1:8001")
+
+    def test_the_old_single_file_is_simply_not_used(self, monkeypatch, tmp_path):
+        """It is neither migrated nor deleted: nothing can say which API it was written for.
+
+        That is the very reason the name changed, so guessing would be the mistake this
+        prevents — and deleting it would throw away fragments somebody may still want to
+        read.
+        """
+        monkeypatch.delenv("AUDIT_OUTBOX_PATH", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        legacy = tmp_path / "local-leads-automation" / "outbox.sqlite"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_bytes(b"old")
+
+        assert default_path("http://127.0.0.1:8000") != legacy
+
+        Outbox(default_path("http://127.0.0.1:8000")).put("runs", "r1", {"machine": "m"})
+
+        assert legacy.read_bytes() == b"old"
+
+    @pytest.mark.parametrize("url, expected", [
+        ("http://127.0.0.1:8000", "127.0.0.1-8000"),
+        ("https://platform.segurseo.com", "platform.segurseo.com"),
+        ("https://platform.segurseo.com/", "platform.segurseo.com"),
+        ("https://PLATFORM.Segurseo.COM", "platform.segurseo.com"),
+        ("http://localhost:8000", "localhost-8000"),
+        # config.py admits ::1 as a local host, so this is reachable — and the colons would
+        # otherwise be stripped down to a bare "1".
+        ("http://[::1]:8000", "ipv6--1-8000"),
+        # Never a crash and never an empty name: an outbox that cannot be named still has
+        # to be writable, because the alternative is a run that refuses to start.
+        ("", "unknown"),
+        ("not a url", "unknown"),
+        ("http://", "unknown"),
+    ])
+    def test_the_name_is_safe_and_readable(self, url, expected):
+        assert api_slug(url) == expected
+        # Nothing that could escape the directory or need quoting in a shell.
+        assert "/" not in expected and " " not in expected
 
 
 class TestFailedFragments:

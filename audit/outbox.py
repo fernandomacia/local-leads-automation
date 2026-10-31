@@ -1,6 +1,7 @@
 """Local outbox for audit records: written by the worker, waiting to be sent on.
 
-One SQLite file per machine, outside the repository. Each put() is one fragment of a row
+One SQLite file per machine *and per API*, outside the repository — fragments written
+against one API can only be sent to that one. Each put() is one fragment of a row
 in the audit store, holding the columns known at that moment, and fragments leave in the
 order they were written: a row's first fragment, which carries its required columns,
 always arrives before the later ones that complete it.
@@ -23,6 +24,7 @@ leaves out so a broken outbox cannot feed on its own warnings.
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -32,6 +34,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +66,60 @@ CREATE INDEX IF NOT EXISTS records_record_idx  ON records (target, record_id);
 """
 
 
-def default_path() -> Path:
-    """Where this machine keeps its outbox; AUDIT_OUTBOX_PATH overrides it."""
+def api_slug(api_base_url: str) -> str:
+    """A filename-safe name for an API, from its host and port.
+
+    ``http://127.0.0.1:8000`` becomes ``127.0.0.1-8000`` and
+    ``https://platform.segurseo.com`` becomes ``platform.segurseo.com``. The scheme and the
+    path are left out: they do not distinguish one audit store from another, and the port
+    does — two local APIs on one machine are two stores.
+
+    Anything the URL cannot supply falls back to ``unknown``, which is a real answer rather
+    than a crash: an outbox that cannot be named still has to be writable, because the
+    alternative is a run that refuses to start over a filename.
+    """
+    host = ""
+    try:
+        parsed = urlparse(api_base_url or "")
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}-{parsed.port}"
+    except ValueError:
+        # An unparseable authority — a port that is not a number. Named rather than raised.
+        host = ""
+
+    # An IPv6 literal is colons, which the sanitiser below turns into leading dashes and
+    # then strips: `::1` would come out as a bare `1`. config.py admits `::1` as a local
+    # host, so this is reachable, and `ipv6-1-8000` is a filename somebody can read.
+    if ":" in host:
+        host = f"ipv6-{host}"
+
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", host).strip("-.").lower()
+
+    return safe or "unknown"
+
+
+def default_path(api_base_url: str = "") -> Path:
+    """Where this machine keeps the outbox for one API; AUDIT_OUTBOX_PATH overrides it.
+
+    **One file per API, and that is a correctness rule rather than tidiness.** The outbox is
+    per machine, but the worker is pointed at an API by its env file, and fragments written
+    against one API can only ever be sent to that one: a search attempt names a
+    ``lead_search_id`` the other API has never heard of, and the reference would be refused
+    — or, far worse, a local run left with fragments pending would be uploaded into
+    production the next time the worker was started against it.
+
+    The old single ``outbox.sqlite`` is simply no longer read. It is not migrated and not
+    deleted: there is no way to tell which API its fragments were written against, which is
+    the whole reason this changed, and guessing would be the mistake this prevents.
+    """
     if override := os.environ.get("AUDIT_OUTBOX_PATH"):
         return Path(override)
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
-    return base / "local-leads-automation" / "outbox.sqlite"
+    return base / "local-leads-automation" / f"outbox-{api_slug(api_base_url)}.sqlite"
 
 
 def _now() -> str:
@@ -96,8 +144,9 @@ class PendingRecord:
 
 
 class Outbox:
-    def __init__(self, path: Path | str | None = None) -> None:
-        self.path = Path(path) if path else default_path()
+    def __init__(self, path: Path | str | None = None, *, api_base_url: str = "") -> None:
+        """The outbox at ``path``, or this machine's own for the API at ``api_base_url``."""
+        self.path = Path(path) if path else default_path(api_base_url)
         self._ready = False
         self._lock = threading.Lock()
 
