@@ -20,18 +20,25 @@ from config import APP_VERSION
 # it travels as the fragment's record_id rather than among its fields.
 REQUIRED_COLUMNS = {
     "runs": {"machine", "worker_version", "started_at", "last_seen_at"},
-    "search_attempts": {"run_id", "api_search_id", "profession", "city", "started_at",
+    "search_attempts": {"run_id", "lead_search_id", "profession", "city", "started_at",
                         "cards_seen", "cards_skipped_known", "leads_reported",
                         "leads_inserted"},
     "cards": {"search_attempt_id", "seen_at", "outcome"},
-    "analyses": {"run_id", "api_lead_id", "started_at"},
+    "analyses": {"run_id", "lead_id", "started_at"},
     "llm_calls": {"analysis_id", "started_at", "model", "attempts"},
     "log_entries": {"run_id", "logged_at", "kind", "level", "logger"},
 }
 
-_JOB = {"id": "lead-1", "lead_search_id": "search-1", "business_name": "Ejemplo SL",
+# Real UUIDs because that is what the API sends: both `leads.id` and `lead_searches.id`
+# are uuid columns there, and the audit's own columns are resolved against them — so a
+# fragment naming `"search-1"` is one the API can only refuse. The recorder checks the
+# shape and records nothing rather than queueing a row that can never land.
+_SEARCH_ID = "11111111-1111-4111-8111-111111111111"
+_LEAD_ID = "22222222-2222-4222-8222-222222222222"
+
+_JOB = {"id": _LEAD_ID, "lead_search_id": _SEARCH_ID, "business_name": "Ejemplo SL",
         "website": "https://ejemplo.es"}
-_SEARCH = {"id": "search-1", "profession": "fontaneros", "city": "Elche", "max_results": 5}
+_SEARCH = {"id": _SEARCH_ID, "profession": "fontaneros", "city": "Elche", "max_results": 5}
 _CARD = {"lead": "Abogados García", "website": "https://www.Ejemplo.es/contacto",
          "phone": "965123456", "address": "Calle Mayor 1", "city": "Elche"}
 

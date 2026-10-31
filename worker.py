@@ -19,7 +19,8 @@ import time
 
 import requests
 
-from config import API_BASE_URL, APP_VERSION, BATCH_SIZE, HEADLESS, POLL_INTERVAL, SOCIAL_DOMAINS
+from config import (API_BASE_URL, API_TOKEN, APP_VERSION, BATCH_SIZE, HEADLESS, POLL_INTERVAL,
+                    SOCIAL_DOMAINS)
 from scraper.card_issues import maps_card_issues
 from scraper.maps_scraper import scrape_incrementally
 from scraper.web_analyzer import analyze
@@ -699,7 +700,10 @@ def main() -> None:
         # Opened inside the handlers' reach, and after the lines above so the audit never
         # delays what the operator is waiting to read. An interrupt during startup used
         # to land outside both handlers and leave a run open with nobody to close it.
-        recorder.start()
+        # The API is handed over rather than read inside audit/: nothing there imports
+        # config, and the base URL is also what decides which outbox is opened — the
+        # fragments of a local run must never be uploaded into production.
+        recorder.start(api_base_url=API_BASE_URL, api_token=API_TOKEN)
         while True:
             try:
                 if job := claim_next_analysis_job():

@@ -21,19 +21,36 @@ def make_soup(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
 
+def _no_upload(*_args, **_kwargs) -> None:
+    """What ``recorder._start_upload`` does during the suite: nothing."""
+
+
 @pytest.fixture(autouse=True)
 def audit_stays_in_the_test(tmp_path, monkeypatch):
-    """Keep every test's audit inside the test: a temporary outbox and no leftover state.
+    """Keep every test's audit inside the test: a temporary outbox, no uploads, no leftovers.
 
     ``worker.main()`` opens an audit run, so without this any test that reaches it wrote
     into the developer's own outbox. The module state is restored after each test, so a
     run left open by one cannot record into the next, and the log handler one test
     installs on the root logger cannot outlive it.
+
+    **And it must not upload, which is a separate hazard from the outbox.** `config.py`
+    loads the developer's real `.env` with `override=True`, so `API_BASE_URL` and
+    `API_TOKEN` in the suite are whatever that file says — the local API and a token it
+    accepts. `main()` hands both to `recorder.start()`, so without this the suite posted
+    every fragment it produced to a running API and filled its `audit_runs` with dozens of
+    rows from test runs. Redirecting the outbox does not help: the fragments were written
+    to `tmp_path` and sent from there perfectly well.
+
+    The uploader is tested on its own, with a fake session (`tests/test_audit_upload.py`),
+    which is the only place in the suite that exercises a request at all.
     """
     monkeypatch.setenv("AUDIT_OUTBOX_PATH", str(tmp_path / "outbox.sqlite"))
     monkeypatch.setattr(recorder, "_outbox", None)
     monkeypatch.setattr(recorder, "_run_id", None)
     monkeypatch.setattr(recorder, "_log_handler", None)
+    monkeypatch.setattr(recorder, "_uploader", None)
+    monkeypatch.setattr(recorder, "_start_upload", _no_upload)
     yield
     # The handler is held by the root logger, which no fixture restores.
     recorder._remove_log_handler()

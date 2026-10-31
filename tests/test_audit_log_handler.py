@@ -9,8 +9,8 @@ from audit import recorder
 from audit.log_handler import AuditLogHandler
 from audit.outbox import Outbox
 
-_JOB = {"id": "lead-1", "business_name": "Ejemplo SL", "website": "https://ejemplo.es"}
-_SEARCH = {"id": "search-1", "profession": "fontaneros", "city": "Elche"}
+_JOB = {"id": "22222222-2222-4222-8222-222222222222", "business_name": "Ejemplo SL", "website": "https://ejemplo.es"}
+_SEARCH = {"id": "11111111-1111-4111-8111-111111111111", "profession": "fontaneros", "city": "Elche"}
 
 
 def emit(name: str, level: int = logging.WARNING, message: str = "algo", exc_info=None) -> None:

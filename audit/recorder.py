@@ -9,10 +9,10 @@ The first fragment of a row is its INSERT, so it carries every NOT NULL column o
 table — the ones with a default included, to keep the rule free of exceptions somebody has
 to remember. Later fragments carry only what they add.
 
-Fragments are written to the local outbox and stay there. They are destined for
-SegurSEO-API, which has no endpoint for them yet, so ``_start_upload`` and ``_stop_upload``
-are the two places that will learn to send them and the only ones that will change when
-they do.
+Fragments are written to the local outbox and sent on from there by ``audit.upload``, on a
+thread of its own. ``_start_upload`` and ``_stop_upload`` are the seam, so worker.py talks
+to this module and nothing else — and whatever a run cannot send is simply still pending
+when the next one starts.
 
 Nothing here raises at the worker. A failure to record is a warning under the "audit"
 logger hierarchy and nothing else: a lead must never be reported as failed because its
@@ -34,6 +34,7 @@ from functools import wraps
 
 from audit.log_handler import AuditLogHandler
 from audit.outbox import Outbox
+from audit.upload import Uploader
 from config import APP_VERSION
 from scraper.card_issues import maps_card_issues
 from scraper.domains import normalize_domain
@@ -57,6 +58,7 @@ _PAUSE_MESSAGES = {
 
 _outbox: Outbox | None = None
 _run_id: str | None = None
+_uploader: Uploader | None = None
 _last_heartbeat = 0.0
 _log_handler: AuditLogHandler | None = None
 
@@ -71,6 +73,88 @@ _llm_call_id: ContextVar[str | None] = ContextVar("audit_llm_call", default=None
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# ── The contract's types ──────────────────────────────────────────────────────
+#
+# The API types every column and refuses a value of the wrong one: `"3"` is not an integer
+# and `1` is not a boolean. Most of what is recorded here is built in this module and is
+# right by construction, but three sources are not — the job dicts the API hands back, the
+# scraped card, and OpenRouter's `usage` block — and a float where an integer goes costs the
+# whole fragment, hours later, with the reason in a log nobody is reading.
+#
+# So every value from outside is passed through one of these on its way in. They coerce what
+# can be read and answer None for what cannot, which drops that one field rather than the
+# fragment carrying it: a token count that arrived unreadable is worth less than the row.
+
+
+def _as_int(value) -> int | None:
+    """An integer for a column typed as integer, or None when the value is not one.
+
+    `isinstance(True, int)` is True in Python, so booleans are excluded first — the API
+    would refuse one, and a count of True is not a count. A whole float is accepted because
+    JSON has one number type and OpenRouter sends token counts through it.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _as_number(value) -> int | float | None:
+    """A number for a column typed as numeric — a cost, a temperature — or None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _as_bool(value) -> bool | None:
+    """A boolean for a column typed as boolean, and nothing else.
+
+    Deliberately not truthiness: `parsed_ok` answers a question, and reading a non-empty
+    string as True would invent an answer rather than record one.
+    """
+    return value if isinstance(value, bool) else None
+
+
+def _as_text(value) -> str | None:
+    """Text for a column typed as text, with empty read as absent."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return text or None
+
+
+def _as_uuid(value) -> str | None:
+    """An id the API will accept as a uuid, or None.
+
+    Checked rather than passed through: these are the columns the API resolves against its
+    own rows, so a malformed one is not a field it drops but a fragment it refuses — and the
+    row it belongs to is then missing from the trail entirely.
+    """
+    text = _as_text(value)
+    if text is None:
+        return None
+    try:
+        uuid.UUID(text)
+    except ValueError:
+        return None
+    return text
 
 
 def _describe(error: BaseException | str) -> str:
@@ -100,14 +184,24 @@ def _guarded(fn):
 
 # ── The run ───────────────────────────────────────────────────────────────────
 
-def start(outbox: Outbox | None = None) -> str | None:
+def start(
+    outbox: Outbox | None = None, *, api_base_url: str = "", api_token: str = "",
+) -> str | None:
     """Open a run and start filing what the worker does under it.
 
     There is one environment per API, so the run says which machine it ran on and which
     version of the worker it was — the API it reported to is the one holding the record.
 
+    The API is passed in rather than read from `config`: nothing in `audit/` imports it,
+    which is what keeps this package a leaf the tests can drive without an env file. The
+    base URL also decides *which* outbox is opened, because fragments written against one
+    API can only be sent to that one.
+
     Args:
-        outbox: Where fragments are written; this machine's own outbox when omitted.
+        outbox: Where fragments are written; the outbox for `api_base_url` when omitted.
+        api_base_url: The API the fragments are destined for. Without it nothing is
+            uploaded and the fragments stay local, which is what the tests do.
+        api_token: The worker token, the same one `api/client.py` sends.
 
     Returns:
         The run id, or None when the run could not be opened — in which case every other
@@ -119,7 +213,7 @@ def start(outbox: Outbox | None = None) -> str | None:
 
     try:
         run_id = str(uuid.uuid4())
-        box = outbox if outbox is not None else Outbox()
+        box = outbox if outbox is not None else Outbox(api_base_url=api_base_url)
         now = _utcnow()
         box.put("runs", run_id, {
             "machine": socket.gethostname(),
@@ -129,7 +223,7 @@ def start(outbox: Outbox | None = None) -> str | None:
         })
         _outbox, _run_id, _last_heartbeat = box, run_id, time.monotonic()
         _install_log_handler()
-        _start_upload(box)
+        _start_upload(box, api_base_url, api_token)
         return run_id
     except Exception:
         logger.warning("Could not open the audit run; this run is not audited", exc_info=True)
@@ -139,21 +233,46 @@ def start(outbox: Outbox | None = None) -> str | None:
 
 # ── Sending it on ─────────────────────────────────────────────────────────────
 #
-# Nothing is uploaded yet. The fragments accumulate in the local outbox, which already
-# keeps the three states an uploader needs — pending, sent, refused — and they are bound
-# for SegurSEO-API: each API holds the audit of the worker that reports to it, so a local
-# run is recorded locally and a production run in production.
-#
-# These two are where that goes, and the only part of the recorder that changes when the
-# endpoint exists. Deliberately no contract yet: what the request looks like is for the
-# commit that can test it against the real thing.
+# `audit.upload` does the work; these two are the seam, so the recorder stays the only
+# thing worker.py talks to. Each API holds the audit of the worker that reports to it, so
+# a local run goes up locally and a production run to production — which the outbox
+# enforces by being per API, not this.
 
-def _start_upload(outbox: Outbox) -> None:
-    """Begin sending fragments to the API. Does nothing until that endpoint exists."""
+def _start_upload(outbox: Outbox, api_base_url: str, api_token: str) -> None:
+    """Begin sending fragments to the API, if there is one to send them to.
+
+    Without a base URL or a token nothing is uploaded and the fragments stay in the
+    outbox: that is the state the tests run in, and the state a misconfigured worker runs
+    in rather than failing to start.
+    """
+    global _uploader
+    if not api_base_url or not api_token:
+        return
+    try:
+        _uploader = Uploader(outbox, api_base_url, api_token)
+        _uploader.start()
+    except Exception:
+        logger.warning("Could not start sending the audit; it stays local", exc_info=True)
+        _uploader = None
 
 
-def _stop_upload() -> None:
-    """Send what is left before the worker goes. Does nothing until that endpoint exists."""
+def _stop_upload() -> int:
+    """Send what is left before the worker goes, and say how much still is.
+
+    Returns:
+        Fragments still pending after the flush, or -1 when nothing could be counted.
+        None of it when there was no uploader, in which case the caller counts the outbox
+        itself — the fragments are simply all still there.
+    """
+    global _uploader
+    uploader, _uploader = _uploader, None
+    if uploader is None:
+        return -1
+    try:
+        return uploader.stop()
+    except Exception:
+        logger.warning("Could not stop the audit uploader cleanly", exc_info=True)
+        return -1
 
 
 @_guarded
@@ -220,9 +339,13 @@ def stop(end_reason: str) -> int:
         _analysis_clock.set(None)
         _llm_call_id.set(None)
 
-    _stop_upload()
+    # After the closing fragment is written, so the flush carries it: the run's own
+    # `ended_at` is the last thing that should still be sitting on this machine.
+    flushed = _stop_upload()
     if not closed:
         return -1
+    if flushed >= 0:
+        return flushed
     try:
         return outbox.pending_count()
     except Exception:
@@ -296,13 +419,22 @@ def search_started(job: dict) -> None:
     A search released and claimed again later is a new attempt, not a second visit to
     this row: what the store is asked is "what happened each time this was worked on".
     """
+    # The API resolves this against its own lead_searches and refuses the fragment if it
+    # cannot, so a job with no usable id has no recordable attempt at all. Recording
+    # nothing is better than a row that can only ever be rejected, and the warning says
+    # which — under "audit", so it never reaches the operator's terminal.
+    search_id = _as_uuid(job.get("id"))
+    if search_id is None:
+        logger.warning("Search job with no usable id; this attempt is not audited")
+        return
+
     attempt_id = str(uuid.uuid4())
     _outbox.put("search_attempts", attempt_id, {
         "run_id": _run_id,
-        "api_search_id": str(job.get("id", "")),
-        "profession": job.get("profession") or "",
-        "city": job.get("city") or "",
-        "max_results": job.get("max_results"),
+        "lead_search_id": search_id,
+        "profession": _as_text(job.get("profession")) or "",
+        "city": _as_text(job.get("city")) or "",
+        "max_results": _as_int(job.get("max_results")),
         "started_at": _utcnow(),
         "cards_seen": 0,
         "cards_skipped_known": 0,
@@ -333,10 +465,10 @@ def search_finished(
     fields = {
         "ended_at": _utcnow(),
         "outcome": outcome,
-        "cards_seen": cards_seen,
-        "cards_skipped_known": cards_skipped_known,
-        "leads_reported": leads_reported,
-        "leads_inserted": leads_inserted,
+        "cards_seen": _as_int(cards_seen) or 0,
+        "cards_skipped_known": _as_int(cards_skipped_known) or 0,
+        "leads_reported": _as_int(leads_reported) or 0,
+        "leads_inserted": _as_int(leads_inserted) or 0,
     }
     if error is not None:
         fields["error"] = _describe(error)
@@ -367,11 +499,16 @@ def card_reported(lead: dict) -> None:
         "seen_at": _utcnow(),
         "outcome": "reported",
         "maps_issues": maps_card_issues(lead),
-        "domain": normalize_domain(lead.get("website") or "") or None,
-        "business_name": lead.get("lead") or None,
-        "website": lead.get("website") or None,
-        "phone": lead.get("phone") or None,
-        "address": lead.get("address") or None,
+        "domain": normalize_domain(_as_text(lead.get("website")) or "") or None,
+        "business_name": _as_text(lead.get("lead")),
+        "website": _as_text(lead.get("website")),
+        "phone": _as_text(lead.get("phone")),
+        "address": _as_text(lead.get("address")),
+        # Not one more detail among the rest: it is the only thing tying this card to the
+        # lead it became, because the card is recorded before that lead exists and carries
+        # no lead id. The API matches on it to empty a card's content when its lead is
+        # deleted, so a card stored without it is personal data that erasure cannot reach.
+        "maps_url": _as_text(lead.get("maps_url")),
         "raw": lead,
     })
 
@@ -399,14 +536,21 @@ def card_skipped_known(domain: str) -> None:
 @_guarded
 def analysis_started(job: dict) -> None:
     """Open the row for this attempt at analysing a lead."""
+    # Same as a search attempt: the API resolves lead_id against its own leads, so a job
+    # with no usable id has no recordable analysis.
+    lead_id = _as_uuid(job.get("id"))
+    if lead_id is None:
+        logger.warning("Analysis job with no usable id; this analysis is not audited")
+        return
+
     analysis_id = str(uuid.uuid4())
     _outbox.put("analyses", analysis_id, {
         "run_id": _run_id,
-        "api_lead_id": str(job.get("id", "")),
-        "api_search_id": job.get("lead_search_id") or None,
+        "lead_id": lead_id,
+        "lead_search_id": _as_uuid(job.get("lead_search_id")),
         "started_at": _utcnow(),
-        "business_name": job.get("business_name") or None,
-        "website": job.get("website") or None,
+        "business_name": _as_text(job.get("business_name")),
+        "website": _as_text(job.get("website")),
     })
     _analysis_id.set(analysis_id)
     _analysis_clock.set(time.monotonic())
@@ -475,10 +619,10 @@ def llm_call_started(
     _outbox.put("llm_calls", call_id, {
         "analysis_id": analysis_id,
         "started_at": _utcnow(),
-        "model": model,
+        "model": _as_text(model) or "",
         "attempts": [],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        "temperature": _as_number(temperature),
+        "max_tokens": _as_int(max_tokens),
         "system_prompt": system_prompt,
         "system_prompt_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
         "user_prompt": user_prompt,
@@ -508,13 +652,15 @@ def llm_call_finished(
         return
 
     _outbox.put("llm_calls", call_id, {
-        "attempts": attempts,
-        "final_status": final_status,
-        "latency_ms": latency_ms,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "cost_usd": cost_usd,
-        "response_raw": response_raw,
+        "attempts": attempts if isinstance(attempts, list) else [],
+        "final_status": _as_int(final_status),
+        "latency_ms": _as_int(latency_ms),
+        # OpenRouter's usage block is JSON from a third party: the token counts arrive as
+        # numbers but not reliably as integers, and `cost` has been seen as a string.
+        "prompt_tokens": _as_int(prompt_tokens),
+        "completion_tokens": _as_int(completion_tokens),
+        "cost_usd": _as_number(cost_usd),
+        "response_raw": _as_text(response_raw),
     })
 
 
@@ -534,7 +680,7 @@ def llm_call_parsed(response_parsed: dict | None, *, parsed_ok: bool) -> None:
     _llm_call_id.set(None)
     _outbox.put("llm_calls", call_id, {
         "response_parsed": response_parsed,
-        "parsed_ok": parsed_ok,
+        "parsed_ok": _as_bool(parsed_ok),
     })
 
 

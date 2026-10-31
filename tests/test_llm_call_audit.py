@@ -53,7 +53,7 @@ def audited(tmp_path):
     """A run with an analysis in progress, writing to a temporary outbox."""
     box = Outbox(tmp_path / "llm-outbox.sqlite")
     recorder.start(outbox=box)
-    recorder.analysis_started({"id": "lead-1", "business_name": "Ejemplo SL"})
+    recorder.analysis_started({"id": "22222222-2222-4222-8222-222222222222", "business_name": "Ejemplo SL"})
     yield box
     recorder.stop("stopped")
 
