@@ -331,12 +331,13 @@ env_select.py                # Asks which API to use, before config.py loads any
 
 This worker is one of four components around the API, which is where the compatible
 combinations are recorded — the Compatibility table in `SegurSEO-API/README.md`, keyed to
-`APP_VERSION`. Two things it says that matter here:
+`APP_VERSION`. Three things that matter here:
 
 - **Deploy the API first.** Up to 2.8.x every version of this worker needed an API at least
-  as new as itself; 2.9.0 is the first that degrades instead of requiring, and runs against
-  13.2.x with one feature dark. Either way those API releases accepted the older input too,
-  so the gap stays short and one-sided in that direction only.
+  as new as itself; since 2.9.0 they degrade instead of requiring — a feature goes dark
+  against an older API rather than the run failing, as 2.9.0 does against 13.2.x. Either way
+  those API releases accepted the older input too, so the gap stays short and one-sided in
+  that direction only.
 - **2.10.0 needs API 13.4.0 or newer**, which is where `POST /api/scraper/audit/fragments`
   exists. It degrades rather than failing: against an older API the request 404s, the
   uploader backs off and the fragments stay in the local outbox, which is what the outbox is
