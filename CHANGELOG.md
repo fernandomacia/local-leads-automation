@@ -7,7 +7,7 @@ versions are `APP_VERSION`, which is also what the API's Compatibility table key
 worker requirements to.
 
 > **This file starts here, and does not reconstruct what came before.** The tags stop at
-> `v2.3.0`, so the only record of 2.4.0 through 2.8.x is the commit messages and the project
+> `v2.3.0`, so the only record of 2.4.0 through 2.9.x is the commit messages and the project
 > phases in `CLAUDE.md`. Rebuilding those entries from them now would read tidier than the
 > history actually was, which is the one thing a changelog cannot afford.
 

@@ -545,6 +545,29 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
 
 ---
 
+## Releases and tagging
+
+`APP_VERSION` in `config.py` is the version, and the API's Compatibility table keys its
+worker requirements to it: «Worker ≥ 2.10.0» there has to be a number somebody can point at a
+commit for. So every release is an annotated tag `v{APP_VERSION}` on the commit that ships it,
+pushed with `git push origin v{APP_VERSION}` — never `git push --tags`, which sends every
+local tag at once.
+
+**Tagging restarts at `v2.10.0`.** The old tags stop at `v2.3.0`, and 2.4.0 through 2.9.x are
+recorded only in their commit messages; `CHANGELOG.md` starts at 2.10.0 for the same reason
+and says why reconstructing the rest now would read tidier than the history actually was. The
+first tagged release is therefore the first one the changelog documents, which is the only
+arrangement in which the two records agree with each other.
+
+**A tag here is a record, not a deploy.** This repository has no workflow and no deploy
+script — the worker runs wherever somebody started it — so pushing a tag changes nothing by
+itself. That is the opposite of the API, where pushing the tag *is* the deploy, and it decides
+the order when a release is a pair: tag this side first, the API last. What the tag buys is
+that «which worker was this» stays answerable months later, which the audit trail asks
+directly: every run records its `worker_version`.
+
+---
+
 ## Project Phases
 
 - [x] Phase 0: Basic Maps scraper prototype
