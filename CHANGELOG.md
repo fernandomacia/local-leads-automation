@@ -39,17 +39,17 @@ worker requirements to.
   own failures, because a lead reported as failed over an audit row would be a worse outcome
   than no audit at all.
 
-- **A local outbox, one SQLite file per machine.** Every record is written there as a
-  fragment of a row — the columns known at that moment — and the fragments that follow
+- **A local outbox, one SQLite file per machine and per API.** Every record is written there
+  as a fragment of a row — the columns known at that moment — and the fragments that follow
   complete it. The outbox keeps what is pending, what has been sent, and what was refused
   along with the reason, so one bad fragment never holds back the ones written after it;
   records already sent are cleared after seven days and refused ones after thirty, because
   those are the ones somebody will want to read.
 
-  **One file per API, not just per machine.** Each API holds the audit of the worker that
-  reports to it, so a local run is recorded locally and a production run in production — and
-  the fragments of a run against one API can only ever be sent to that one, because a search
-  attempt names a `lead_search_id` the other has never heard of. The name says which:
+  **Per API is a correctness rule, not tidiness.** Each API holds the audit of the worker
+  that reports to it, so a local run is recorded locally and a production run in production
+  — and the fragments of a run against one API can only ever be sent to that one, because a
+  search attempt names a `lead_search_id` the other has never heard of. The name says which:
   `outbox-127.0.0.1-8000.sqlite`, `outbox-platform.segurseo.com.sqlite`. The old single
   `outbox.sqlite` is simply no longer read; it is neither migrated nor deleted, because
   nothing can say which API its fragments were written against, which is the whole reason

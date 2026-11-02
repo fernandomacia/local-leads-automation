@@ -34,13 +34,13 @@ worker's and as "email or any social network", and it was neither.
   together is recorded in the Compatibility table in `SegurSEO-API/README.md`, keyed to
   `APP_VERSION`, and it names no version below which this worker refuses to run: every
   pair it lists for the worker turns a feature off rather than stopping the run
-- **13.3.0 is the pair for this worker, and a soft one.** Against 13.2.x nothing fails and
-  no host is taken for a domain — the empty `website` deduplicates the lead by name on
-  either version, and `social_as_website` is stored, since `maps_issues` has carried its
-  keys through unvalidated since 3.0.0. What goes dark is the social profile:
-  `social_networks` has no rule at ingest before 13.3.0, so it is dropped, and for a
-  business with no site of its own the analysis has no page to read the profile from
-  either — the only address that business has reaches nobody
+- **13.4.0 is the pair for this worker, and a soft one.** It is where
+  `POST /api/scraper/audit/fragments` exists. Against 13.3.x nothing fails and no work is
+  lost: the request 404s, the uploader backs off and marks nothing, so every run's audit
+  accumulates in the local outbox — one file per API — and goes up as soon as this API is
+  upgraded. What goes dark below 13.4.0 is the audit trail reaching the panel, and nothing
+  the worker does for a lead depends on it. Older pairs are in the Compatibility table and
+  in the Compatibility section below; this is the one an install has to meet
 
 ---
 
