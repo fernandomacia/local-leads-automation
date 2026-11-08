@@ -11,6 +11,27 @@ worker requirements to.
 > phases in `CLAUDE.md`. Rebuilding those entries from them now would read tidier than the
 > history actually was, which is the one thing a changelog cannot afford.
 
+## [Unreleased]
+
+### Changed
+
+- **The argumentario's shape is pinned by a schema rather than asked for in the prompt.**
+  The request carries a JSON schema and is routed only to providers that enforce one:
+  `json_object` guaranteed the syntax and nothing about the shape, so the model invented a
+  layout for Objeciones from one call to the next. Every phase is a text and Objeciones is a
+  list of exchanges, each with what the customer says and what we answer. The prompt shows
+  the same object the schema holds the model to, and one list in the code drives both, so
+  the example it reads and the shape it is judged by cannot drift apart.
+
+### Fixed
+
+- **A numbered objection is no longer read out as the customer's own words.** "Objeción 1"
+  with "Respuesta 1" repeats no key, so the parser took those labels for content and the
+  panel printed "Objeción 1" where the customer's line belongs — which reached two real
+  leads. Numbering is ignored when deciding whether keys are labels, and labels are paired
+  only when two of them actually take turns; any other repetition is kept as one line per
+  entry rather than welded into pairs that were never spoken together.
+
 ## [2.10.0] - 2026-10-31
 
 ### Added

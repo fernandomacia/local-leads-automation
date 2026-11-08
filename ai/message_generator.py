@@ -60,6 +60,51 @@ def _retry_delay(resp: requests.Response, attempt: int) -> float:
             pass
     return min(2 ** attempt + random.uniform(0, 1), 60.0)
 
+# The phases of the call script, in the order the agent reads them. The response schema is
+# built from this list, and a test holds the prompt's example to it: the two describe one
+# contract and must not drift apart.
+_PHASES = ("Apertura", "Identificación del problema", "Impacto en el negocio", "Propuesta", "Objeciones")
+
+
+def _response_format() -> dict:
+    """The schema OpenRouter makes the model generate against (structured outputs).
+
+    json_object only guaranteed valid JSON, not its shape, and the model filled the gap
+    with a different Objeciones layout per call — two of which reached production as
+    labels shown as the customer's words. Every phase is a string; the last is the list
+    of exchanges, each with the customer's line and ours.
+    """
+    text = {"type": "string"}
+    exchange = {
+        "type": "object",
+        "properties": {"objeción": text, "respuesta": text},
+        "required": ["objeción", "respuesta"],
+        "additionalProperties": False,
+    }
+    phases = {name: text for name in _PHASES}
+    phases[_PHASES[-1]] = {"type": "array", "items": exchange}
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "argumentario",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"phone_script": {
+                    "type": "object",
+                    "properties": phases,
+                    "required": list(_PHASES),
+                    "additionalProperties": False,
+                }},
+                "required": ["phone_script"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+_RESPONSE_FORMAT = _response_format()
+
 SYSTEM_PROMPT = f"""Eres un agente comercial de {SENDER_COMPANY}, empresa especializada en diseño web y SEO para negocios locales.
 Tu tarea es generar el argumentario de venta para la llamada a un negocio local.
 
@@ -76,7 +121,7 @@ NORMAS DEL ARGUMENTARIO:
 - Quien llama es un representante de {SENDER_COMPANY}, no un especialista técnico
 - Tratamiento de usted en todo momento
 - Tono profesional pero cercano; directo, sin rodeos ni frases hechas
-- Estructurado en fases claramente etiquetadas: Apertura, Identificación del problema, Impacto en el negocio, Propuesta, Objeciones
+- Estructurado en las cinco fases del formato de respuesta, en ese orden
 - Frases cortas y directas, listas para leer en voz alta
 - Al menos 2 objeciones frecuentes con su respuesta concisa
 - Sin emojis, sin exclamaciones
@@ -119,8 +164,20 @@ agrupada, para no diluir el argumento principal.
 Si solo hay hallazgos del nivel 4, no montes el argumentario entero sobre ellos: menciónalo
 de pasada y apóyate en los problemas de SEO o de la ficha de Google Maps.
 
-Responde ÚNICAMENTE con JSON válido, sin texto adicional:
-{{"phone_script": "argumentario estructurado para la llamada"}}"""
+Responde ÚNICAMENTE con JSON válido, sin texto adicional, con exactamente esta forma.
+Cada fase es un texto; Objeciones es una lista en la que cada elemento lleva lo que dice
+el cliente en "objeción" y lo que respondemos en "respuesta". No numeres ni etiquetes
+las objeciones de ninguna otra forma.
+{{"phone_script": {{
+  "Apertura": "texto",
+  "Identificación del problema": "texto",
+  "Impacto en el negocio": "texto",
+  "Propuesta": "texto",
+  "Objeciones": [
+    {{"objeción": "lo que dice el cliente", "respuesta": "lo que respondemos"}},
+    {{"objeción": "lo que dice el cliente", "respuesta": "lo que respondemos"}}
+  ]
+}}}}"""
 
 
 def _build_prompt(lead: dict) -> str:
@@ -201,7 +258,10 @@ def _complete(user_prompt: str) -> str:
         ],
         "max_tokens": 2000,
         "temperature": 0.6,
-        "response_format": {"type": "json_object"},
+        "response_format": _RESPONSE_FORMAT,
+        # The model is served by several providers and not all of them enforce a schema;
+        # one that does not would ignore it silently. This routes only to those that do.
+        "provider": {"require_parameters": True},
     }
     recorder.llm_call_started(
         model=payload["model"], system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
@@ -256,23 +316,34 @@ def _complete(user_prompt: str) -> str:
         )
 
 
+def _label_form(key: str) -> str:
+    """A key with its numbering removed, so "Objeción 2" and "Objeción" read as one label."""
+    return re.sub(r"\d+", "", key).strip().casefold()
+
+
 def _keep_repeated_keys(pairs: list) -> dict | list:
-    """Build a JSON object without losing values to repeated keys.
+    """Build a JSON object without losing values or pairings to labelled keys.
 
-    The model sometimes labels each line of a section instead of keying it by
-    content: "Objeción 1", "Respuesta", "Objeción 2", "Respuesta". A dict keeps
-    the last value of a repeated key in the first one's position, which silently
-    dropped the answer to the first objection and paired the second answer with it.
+    The model sometimes labels each line of a section instead of keying it by content,
+    with or without numbers: "Objeción 1", "Respuesta", "Objeción 2", "Respuesta", or
+    "Objeción 1", "Respuesta 1", "Objeción 2", "Respuesta 2". As a dict, the first shape
+    loses every repeated answer but the last; as one line per entry, both shapes put
+    the label where the panel expects the customer's words.
 
-    Repeated keys mean the keys are labels, so the entries are kept in order and
-    paired two by two as "label: text — label: text", the labelled shape the
-    panel already splits into the customer's line and ours.
+    Keys that repeat once their numbering is ignored are labels. When two of them take
+    turns, each pair is one exchange and is written "label: text — label: text", the
+    labelled shape the panel splits into the customer's line and ours. Any other
+    repetition is kept as one line per entry, in order, so nothing is dropped.
     """
-    keys = [k for k, _ in pairs]
-    if len(keys) == len(set(keys)):
+    forms = [_label_form(k) for k, _ in pairs]
+    if len(forms) == len(set(forms)):
         return dict(pairs)
+
     lines = [f"{k}: {v}" for k, v in pairs]
-    return [" — ".join(lines[i:i + 2]) for i in range(0, len(lines), 2)]
+    turns = list(dict.fromkeys(forms))
+    if len(turns) == 2 and all(form == turns[i % 2] for i, form in enumerate(forms)):
+        return [" — ".join(lines[i:i + 2]) for i in range(0, len(lines), 2)]
+    return lines
 
 
 def _try_load_json(s: str) -> dict | None:

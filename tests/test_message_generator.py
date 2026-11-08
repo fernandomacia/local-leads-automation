@@ -1,12 +1,14 @@
 """Tests for ai/message_generator.py — pure parsing logic, no real API calls."""
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ai.message_generator import (
     SYSTEM_PROMPT,
+    _PHASES,
+    _RESPONSE_FORMAT,
     _build_prompt,
     _dict_to_text,
     _escape_string_newlines,
@@ -154,6 +156,18 @@ class TestGenerate:
         assert "· Objeción 1: No estoy seguro — Respuesta: Le explico por qué" in script
         assert "· Objeción 2: Ya tenemos web — Respuesta: Es genial que la tenga" in script
 
+    @patch("ai.message_generator._complete", return_value=(
+        '{"phone_script": {"Objeciones": {'
+        '"Objeción 1": "No creo que sea tan grave", "Respuesta 1": "Es una obligación legal", '
+        '"Objeción 2": "Ya tengo quien la gestiona", "Respuesta 2": "Trabajamos con su equipo"}}}'
+    ))
+    def test_numbered_labels_are_paired(self, _):
+        # Verbatim shape from a production lead: no key repeats, so only ignoring the
+        # numbering shows these are labels taking turns.
+        script = generate({"lead": "Test", "has_website": True})["phone_script"]
+        assert "· Objeción 1: No creo que sea tan grave — Respuesta 1: Es una obligación legal" in script
+        assert "· Objeción 2: Ya tengo quien la gestiona — Respuesta 2: Trabajamos con su equipo" in script
+
 
 # ── What the model is told about the card ─────────────────────────────────────
 
@@ -171,3 +185,36 @@ class TestMapsFindingsReachThePrompt:
         # pitch skipped it, which is how the incident went unsaid on the call.
         assert "enlaza a una red social" in SYSTEM_PROMPT
         assert "la propuesta es enlazar la ficha a su web" in SYSTEM_PROMPT
+
+
+# ── The shape the answer must have ────────────────────────────────────────────
+
+class TestResponseFormat:
+    def test_the_format_the_prompt_asks_for_reads_as_pairs(self):
+        # The contract and the parser have to agree: the example the model is shown,
+        # returned as is, must come out as one line per objection with both voices.
+        # Two incidents came from the model inventing the shape of Objeciones.
+        example = SYSTEM_PROMPT.split("No numeres ni etiquetes", 1)[1]
+        script = _dict_to_text(_parse(example)["phone_script"])
+        assert "--- Objeciones ---" in script
+        assert "· objeción: lo que dice el cliente — respuesta: lo que respondemos" in script
+        assert script.count("--- ") == 5
+
+    def test_the_schema_and_the_prompt_name_the_same_phases(self):
+        # One contract described twice: the example the model reads and the schema the
+        # provider enforces. If they disagree the model is told one thing and held to another.
+        example = SYSTEM_PROMPT.split("No numeres ni etiquetes", 1)[1]
+        schema = _RESPONSE_FORMAT["json_schema"]["schema"]["properties"]["phone_script"]
+        assert list(_parse(example)["phone_script"]) == list(_PHASES) == schema["required"]
+
+    def test_the_request_asks_for_the_schema_and_a_provider_that_enforces_it(self):
+        resp = MagicMock(status_code=200, headers={})
+        resp.json.return_value = {"choices": [{"message": {"content": '{"phone_script": "x"}'}}]}
+        with patch("ai.message_generator.requests.post", return_value=resp) as post:
+            generate({"lead": "Test", "has_website": True})
+
+        payload = post.call_args.kwargs["json"]
+        assert payload["response_format"]["type"] == "json_schema"
+        assert payload["response_format"]["json_schema"]["strict"] is True
+        # Without it OpenRouter may route to a provider that ignores the schema silently.
+        assert payload["provider"] == {"require_parameters": True}
