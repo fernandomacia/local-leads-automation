@@ -34,13 +34,16 @@ worker's and as "email or any social network", and it was neither.
   together is recorded in the Compatibility table in `SegurSEO-API/README.md`, keyed to
   `APP_VERSION`, and it names no version below which this worker refuses to run: every
   pair it lists for the worker turns a feature off rather than stopping the run
-- **13.4.0 is the pair for this worker, and a soft one.** It is where
-  `POST /api/scraper/audit/fragments` exists. Against 13.3.x nothing fails and no work is
-  lost: the request 404s, the uploader backs off and marks nothing, so every run's audit
-  accumulates in the local outbox — one file per API — and goes up as soon as this API is
-  upgraded. What goes dark below 13.4.0 is the audit trail reaching the panel, and nothing
-  the worker does for a lead depends on it. Older pairs are in the Compatibility table and
-  in the Compatibility section below; this is the one an install has to meet
+- **13.5.0 is the pair for this worker, and a soft one.** It is where
+  `audit_llm_calls.format_errors` exists — the reasons an answer from the model could not
+  be used. Against 13.4.x nothing fails and no lead is affected, but that part of the
+  audit is lost rather than delayed: the API rejects a fragment carrying a column it does
+  not know, and a rejected fragment is an answer, so the uploader takes it out of the
+  queue instead of trying again. What goes with it is the whole closing fragment of each
+  call — `parsed_ok` and `response_parsed` travel in the same one. Below 13.4.0 there is
+  no endpoint at all and the audit simply waits in the outbox. Older pairs are in the
+  Compatibility table and in the Compatibility section below; this is the one an install
+  has to meet
 
 ---
 
@@ -338,11 +341,12 @@ combinations are recorded — the Compatibility table in `SegurSEO-API/README.md
   against an older API rather than the run failing, as 2.9.0 does against 13.2.x. Either way
   those API releases accepted the older input too, so the gap stays short and one-sided in
   that direction only.
-- **2.10.0 needs API 13.4.0 or newer**, which is where `POST /api/scraper/audit/fragments`
-  exists. It degrades rather than failing: against an older API the request 404s, the
-  uploader backs off and the fragments stay in the local outbox, which is what the outbox is
-  for — they go up whenever the API catches up. Everything else the worker does is
-  unaffected, because the audit never blocks a run.
+- **2.11.0 needs API 13.5.0 or newer**, which is where `audit_llm_calls.format_errors`
+  exists; 2.10.0 needed 13.4.0, where the fragments endpoint itself appeared. Both degrade
+  rather than failing — the audit never blocks a run — but they degrade differently: a
+  missing endpoint leaves the fragments pending, while a column the API does not know makes
+  it reject that fragment outright, and a rejection is an answer, so the uploader drops it
+  rather than keeping it for later.
 - **`APP_VERSION` is the contract**, not a label: it is what that table keys its
   requirements to, so a change to what this worker sends or reads bumps it.
 

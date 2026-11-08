@@ -665,13 +665,22 @@ def llm_call_finished(
 
 
 @_guarded
-def llm_call_parsed(response_parsed: dict | None, *, parsed_ok: bool) -> None:
+def llm_call_parsed(
+    response_parsed: dict | None, *, parsed_ok: bool, format_errors: list[str] | None = None,
+) -> None:
     """Close the call with what the worker made of the answer.
 
     ``parsed_ok`` False is an answer that could not be used, not a call that failed: the
     request succeeded, the tokens were spent and the lead is still reported, with an empty
     pitch. Nothing downstream can tell those two apart, which is why they are told apart
     here.
+
+    Args:
+        response_parsed: What the worker made of the answer.
+        parsed_ok: Whether it could be used at all.
+        format_errors: Why it could not, when the reason is its shape — and None when the
+            shape was right. Unlike the prompt and the answer, these outlive the 90-day
+            purge, which is the whole point of them naming no text the model wrote.
     """
     call_id = _llm_call_id.get()
     if call_id is None:
@@ -681,6 +690,7 @@ def llm_call_parsed(response_parsed: dict | None, *, parsed_ok: bool) -> None:
     _outbox.put("llm_calls", call_id, {
         "response_parsed": response_parsed,
         "parsed_ok": _as_bool(parsed_ok),
+        "format_errors": format_errors,
     })
 
 

@@ -233,12 +233,30 @@ def _escape_string_newlines(s: str) -> str:
     return "".join(result)
 
 
-def _complete(user_prompt: str) -> str:
+def _correction(errors: list[str]) -> str:
+    """The second user turn: what was wrong with the answer, and what to send instead."""
+    problems = "\n".join(f"- {error}" for error in errors)
+    return (f"El JSON anterior no tiene la forma pedida:\n{problems}\n\n"
+            "Devuelve el JSON completo corregido, con exactamente la forma indicada, "
+            "sin texto adicional.")
+
+
+def _complete(user_prompt: str, *, rejected: str = "", errors: list[str] | None = None) -> str:
     """Send a chat completion request to OpenRouter and return the raw text.
 
     Retries transient failures (rate limits, upstream 5xx) up to _MAX_ATTEMPTS
     times using server-hinted or exponential-backoff delays. 402 is never
     retried — it signals a billing issue handled upstream by the worker.
+
+    On a corrective attempt the request becomes a conversation: the original prompt, the
+    answer that did not fit as the model's own turn, and what was wrong with it. That is
+    the only difference — the HTTP retries above are a separate matter and unchanged, and
+    a 402 or a timeout still propagates rather than being retried for its format.
+
+    Args:
+        user_prompt: What the model is asked for.
+        rejected: The answer being corrected, sent back as the assistant's turn.
+        errors: What was wrong with it, which is what the correction asks it to fix.
 
     Audited from a ``finally``, so a call that timed out or was refused leaves the same
     trace as one that answered: what was attempted, and how long each attempt took. The
@@ -250,12 +268,22 @@ def _complete(user_prompt: str) -> str:
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    # Recorded as one text, so the audited call can be read on its own: a corrective
+    # attempt whose prompt was only the correction would say nothing about the lead.
+    audited_prompt = user_prompt
+    if errors:
+        correction = _correction(errors)
+        messages += [{"role": "assistant", "content": rejected},
+                     {"role": "user", "content": correction}]
+        audited_prompt = f"{user_prompt}\n\n{correction}"
+
     payload = {
         "model": OPENROUTER_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": messages,
         "max_tokens": 2000,
         "temperature": 0.6,
         "response_format": _RESPONSE_FORMAT,
@@ -264,7 +292,7 @@ def _complete(user_prompt: str) -> str:
         "provider": {"require_parameters": True},
     }
     recorder.llm_call_started(
-        model=payload["model"], system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt,
+        model=payload["model"], system_prompt=SYSTEM_PROMPT, user_prompt=audited_prompt,
         temperature=payload["temperature"], max_tokens=payload["max_tokens"],
     )
     attempts: list[dict] = []
@@ -331,9 +359,14 @@ def _keep_repeated_keys(pairs: list) -> dict | list:
     the label where the panel expects the customer's words.
 
     Keys that repeat once their numbering is ignored are labels. When two of them take
-    turns, each pair is one exchange and is written "label: text — label: text", the
-    labelled shape the panel splits into the customer's line and ours. Any other
+    turns, each pair is one exchange and is written "label: text — label: text". Any other
     repetition is kept as one line per entry, in order, so nothing is dropped.
+
+    Since the answer is validated, none of this reaches the agent any more: a labelled
+    Objeciones fails the format check and is sent back to be corrected. What this still
+    buys is that the check sees every entry. Left to ``dict``, four labelled lines arrive
+    as two — the repeats overwrite — and a validator counting objections would be
+    counting what Python kept rather than what the model sent.
     """
     forms = [_label_form(k) for k, _ in pairs]
     if len(forms) == len(set(forms)):
@@ -401,32 +434,153 @@ def _parse(raw: str) -> dict:
     raise ValueError("No valid JSON found")
 
 
+# ── The shape the answer must have ────────────────────────────────────────────
+#
+# The second barrier behind the schema in `_RESPONSE_FORMAT`. OpenRouter is asked to route
+# only to providers that enforce one, but a provider that quietly does not would return a
+# shape nobody checked, and two of those reached a real lead.
+#
+# **The messages never quote the model** — not a value, not even the name of a key that
+# should not be there. They name the phase, the position or the type, and they are in
+# Spanish because the person reading a failed analysis works in Spanish. That is what lets
+# the API keep `format_errors` as metadata: it outlives the 90-day purge of the prompt and
+# the answer it describes, so "what was wrong with this one" is still answerable when the
+# text itself is gone. A message carrying a fragment of the model's output would be
+# personal data in a column built to survive.
+
+_NOT_JSON = "La respuesta no es JSON válido."
+_OBJECTIONS = _PHASES[-1]
+_EXCHANGE_KEYS = ("objeción", "respuesta")
+_MIN_OBJECTIONS = 2
+
+
+def _is_filled(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _count(number: int, singular: str, plural: str) -> str:
+    return f"{number} {singular if number == 1 else plural}"
+
+
+def _text_error(subject: str, value) -> str:
+    """Why a value is not usable text. Feminine: every field named here is."""
+    return f"{subject} está vacía." if isinstance(value, str) else f"{subject} no es un texto."
+
+
+def _objection_errors(objections) -> list[str]:
+    """What is wrong with the Objeciones list, by position."""
+    if not isinstance(objections, list):
+        return [f"«{_OBJECTIONS}» no es una lista."]
+
+    errors = []
+    if len(objections) < _MIN_OBJECTIONS:
+        errors.append(f"«{_OBJECTIONS}» tiene {_count(len(objections), 'elemento', 'elementos')}; "
+                      f"hacen falta al menos {_MIN_OBJECTIONS}.")
+
+    for position, exchange in enumerate(objections, start=1):
+        if not isinstance(exchange, dict):
+            errors.append(f"La objeción {position} no es un objeto.")
+            continue
+        subjects = (f"La objeción {position}", f"La respuesta de la objeción {position}")
+        for key, subject in zip(_EXCHANGE_KEYS, subjects):
+            if key not in exchange:
+                errors.append(f"La objeción {position} no tiene «{key}».")
+            elif not _is_filled(exchange[key]):
+                errors.append(_text_error(subject, exchange[key]))
+        if spare := len(set(exchange) - set(_EXCHANGE_KEYS)):
+            errors.append(f"La objeción {position} tiene "
+                          f"{_count(spare, 'campo no pedido', 'campos no pedidos')}.")
+    return errors
+
+
+def _format_errors(answer) -> list[str]:
+    """Every way the answer departs from the shape asked for; empty when it fits.
+
+    Args:
+        answer: The parsed answer, or None when there was no JSON to parse.
+
+    Returns:
+        One message per problem, in Spanish and quoting nothing the model wrote — see the
+        note above this function, which is the reason the API can keep them.
+    """
+    if answer is None:
+        return [_NOT_JSON]
+    if not isinstance(answer, dict):
+        return ["La respuesta no es un objeto."]
+    if "phone_script" not in answer:
+        return ["Falta «phone_script»."]
+
+    script = answer["phone_script"]
+    if not isinstance(script, dict):
+        return ["«phone_script» no es un objeto."]
+
+    errors = [f"Falta la fase «{phase}»." for phase in _PHASES if phase not in script]
+    if spare := len(set(script) - set(_PHASES)):
+        errors.append(f"Hay {_count(spare, 'fase no pedida', 'fases no pedidas')}.")
+
+    for phase in _PHASES[:-1]:
+        if phase in script and not _is_filled(script[phase]):
+            errors.append(_text_error(f"La fase «{phase}»", script[phase]))
+
+    if _OBJECTIONS in script:
+        errors += _objection_errors(script[_OBJECTIONS])
+    return errors
+
+
+def _loaded(raw: str):
+    """The JSON object in the answer, or None when there is none to read."""
+    try:
+        return _parse(raw)
+    except ValueError:
+        return None
+
+
+def _script_text(answer: dict) -> str:
+    """The validated script as the text the agent reads aloud."""
+    return _dict_to_text(answer["phone_script"]).replace("\\n", "\n").strip()
+
+
 def generate(lead: dict) -> dict:
     """Generate the phone argumentario for a lead.
+
+    The answer is checked against the shape that was asked for, and one corrective attempt
+    is made when it does not fit: the model is shown its own answer and what was wrong with
+    it. One, not a loop — an argumentario is worth a second try and not a budget, and the
+    agent can write the pitch himself.
+
+    Each attempt is its own audited call, with its own ``format_errors``, so a lead that
+    needed correcting is told apart afterwards from one that answered properly first time.
 
     Args:
         lead: Enriched lead dict from web_analyzer, optionally extended with
               ``city`` and ``profession`` from the job payload.
 
     Returns:
-        Dict with a ``phone_script`` key, empty when the model output cannot be
-        parsed — the lead is still reported, so it settles rather than holding
-        its parent search open over a pitch the agent can write himself.
+        Dict with a ``phone_script`` key, empty when neither answer could be used — the
+        lead is still reported, so it settles rather than holding its parent search open
+        over a pitch the agent can write himself.
     """
     name = lead.get("lead", "")
+    prompt = _build_prompt(lead)
 
-    raw = _complete(_build_prompt(lead))
+    raw = _complete(prompt)
+    answer = _loaded(raw)
+    if errors := _format_errors(answer):
+        recorder.llm_call_parsed({"phone_script": ""}, parsed_ok=False, format_errors=errors)
+        logger.warning("AI answer for '%s' did not fit the format (%d problems); asking again",
+                       name, len(errors))
+        raw = _complete(prompt, rejected=raw, errors=errors)
+        answer = _loaded(raw)
+        errors = _format_errors(answer)
 
-    try:
-        phone_raw = _parse(raw).get("phone_script") or ""
-        phone_text = _dict_to_text(phone_raw) if isinstance(phone_raw, dict) else str(phone_raw)
-        result = {"phone_script": phone_text.replace("\\n", "\n").strip()}
-        recorder.llm_call_parsed(result, parsed_ok=True)
-        return result
-    except (ValueError, KeyError) as exc:
-        logger.exception("AI parse failed for '%s': %s — raw: %.200r", name, exc, raw)
-        # An answer that could not be used, not a call that failed: the tokens were spent
-        # and the lead is still reported, with a pitch the agent writes himself.
-        result = {"phone_script": ""}
-        recorder.llm_call_parsed(result, parsed_ok=False)
-        return result
+    if errors:
+        # The tokens were spent twice and the lead is still reported: it settles with no
+        # pitch rather than holding its parent search open, and the audit says why.
+        recorder.llm_call_parsed({"phone_script": ""}, parsed_ok=False, format_errors=errors)
+        logger.warning("AI answer for '%s' did not fit the format after a correction (%d "
+                       "problems); reporting no pitch", name, len(errors))
+        return {"phone_script": ""}
+
+    result = {"phone_script": _script_text(answer)}
+    recorder.llm_call_parsed(result, parsed_ok=True, format_errors=None)
+    return result

@@ -16,7 +16,19 @@ from audit import recorder
 from audit.outbox import Outbox
 from config import OPENROUTER_API_KEY, OPENROUTER_MODEL
 
-_SCRIPT = '{"phone_script": "Buenos días"}'
+_PITCH = {
+    "Apertura": "Buenos días, le llamo de SegurSEO.",
+    "Identificación del problema": "Su web no carga en móvil.",
+    "Impacto en el negocio": "Pierde a quien la busca desde el teléfono.",
+    "Propuesta": "Lo dejamos resuelto en una semana.",
+    "Objeciones": [
+        {"objeción": "No estoy seguro", "respuesta": "Le explico por qué"},
+        {"objeción": "Ya tenemos web", "respuesta": "Es genial que la tenga"},
+    ],
+}
+# A complete one: an answer that does not fit the format is sent back to the model, so a
+# short script here would make every test in this file count two calls' fragments.
+_SCRIPT = json.dumps({"phone_script": _PITCH}, ensure_ascii=False)
 
 
 def body(content: str = _SCRIPT, usage: dict | None = None) -> dict:
@@ -93,12 +105,14 @@ class TestACallThatAnswered:
 
         assert parsed["parsed_ok"] is True
         assert parsed["response_parsed"] == result
+        # None, not an empty list: the shape was right, so there is nothing to explain.
+        assert parsed["format_errors"] is None
 
     def test_the_answer_is_kept_before_the_fences_come_off(self, audited):
         fenced = f"```json\n{_SCRIPT}\n```"
         with patch("ai.message_generator.requests.post",
                    return_value=FakeResponse(payload=body(fenced))):
-            assert ask() == {"phone_script": "Buenos días"}
+            assert "Buenos días" in ask()["phone_script"]
 
         assert calls(audited)[1]["response_raw"] == fenced
 
@@ -139,13 +153,17 @@ class TestAnAnswerThatCouldNotBeParsed:
                    return_value=FakeResponse(payload=body("esto no es json"))):
             assert ask() == {"phone_script": ""}
 
-        _, http, parsed = calls(audited)
-        # The two are told apart here because nothing downstream can: the request worked,
-        # the tokens were spent, and the lead is reported with an empty pitch.
-        assert http["final_status"] == 200
-        assert http["response_raw"] == "esto no es json"
-        assert parsed["parsed_ok"] is False
-        assert parsed["response_parsed"] == {"phone_script": ""}
+        # Two calls, because an answer that cannot be used is sent back once: six
+        # fragments, three per call, and each call answers for its own attempt.
+        first, second = calls(audited)[:3], calls(audited)[3:]
+        for _, http, parsed in (first, second):
+            # The two are told apart here because nothing downstream can: the request
+            # worked, the tokens were spent, and the lead is reported with no pitch.
+            assert http["final_status"] == 200
+            assert http["response_raw"] == "esto no es json"
+            assert parsed["parsed_ok"] is False
+            assert parsed["response_parsed"] == {"phone_script": ""}
+            assert parsed["format_errors"] == ["La respuesta no es JSON válido."]
 
 
 # ── A call that failed ────────────────────────────────────────────────────────
@@ -194,7 +212,7 @@ class TestWithoutAnAnalysis:
         try:
             with patch("ai.message_generator.requests.post",
                        return_value=FakeResponse(payload=body())):
-                assert ask() == {"phone_script": "Buenos días"}
+                assert "Buenos días" in ask()["phone_script"]
             assert calls(box) == []
         finally:
             recorder.stop("stopped")

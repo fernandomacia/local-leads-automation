@@ -222,6 +222,9 @@ CONTRACT = {
             "user_prompt": TEXT,
             "response_raw": TEXT,
             "response_parsed": JSON,
+            # Metadata, not content: it survives the purge that empties the prompt and the
+            # answer, which is why the worker's messages name nothing the model wrote.
+            "format_errors": JSON,
         },
         required=frozenset({"analysis_id", "started_at", "model"}),
     ),
@@ -410,6 +413,20 @@ class TestEveryFragmentSatisfiesTheContract:
             completion_tokens=120, cost_usd=0.0042, response_raw='{"phone_script":"hola"}',
         )
         recorder.llm_call_parsed({"phone_script": "hola"}, parsed_ok=True)
+        recorder.analysis_finished("analysed")
+
+        assert_outbox_satisfies_contract(started)
+
+    def test_a_call_whose_answer_did_not_fit_the_format(self, started):
+        # The other half of an llm_call: the reasons travel as a jsonb column, so a shape
+        # the API would refuse has to fail here rather than come back rejected hours later.
+        recorder.analysis_started(_JOB)
+        recorder.llm_call_started(model="anthropic/claude", system_prompt="s", user_prompt="u")
+        recorder.llm_call_finished(attempts=[{"status": 200}], final_status=200, latency_ms=12)
+        recorder.llm_call_parsed(
+            {"phone_script": ""}, parsed_ok=False,
+            format_errors=["Falta la fase «Propuesta».", "La objeción 2 no tiene «respuesta»."],
+        )
         recorder.analysis_finished("analysed")
 
         assert_outbox_satisfies_contract(started)

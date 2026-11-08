@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from ai.message_generator import (
     SYSTEM_PROMPT,
@@ -12,6 +13,7 @@ from ai.message_generator import (
     _build_prompt,
     _dict_to_text,
     _escape_string_newlines,
+    _format_errors,
     _parse,
     _try_load_json,
     generate,
@@ -117,7 +119,24 @@ class TestDictToText:
 
 # ── generate() end-to-end (mocked API) ───────────────────────────────────────
 
-_VALID_RESPONSE = '{"phone_script": "Apertura: Buenos días...\\nHemos analizado su web..."}'
+_PITCH = {
+    "Apertura": "Buenos días, le llamo de SegurSEO.",
+    "Identificación del problema": "Su web no carga en móvil.",
+    "Impacto en el negocio": "Pierde a quien la busca desde el teléfono.",
+    "Propuesta": "Lo dejamos resuelto en una semana.",
+    "Objeciones": [
+        {"objeción": "No estoy seguro", "respuesta": "Le explico por qué"},
+        {"objeción": "Ya tenemos web", "respuesta": "Es genial que la tenga"},
+    ],
+}
+
+
+def answer(**phases) -> str:
+    """A complete argumentario as the model is told to return it, phases overridden."""
+    return json.dumps({"phone_script": {**_PITCH, **phases}}, ensure_ascii=False)
+
+
+_VALID_RESPONSE = answer()
 
 
 class TestGenerate:
@@ -128,9 +147,11 @@ class TestGenerate:
         result = generate({"lead": "Test", "has_website": True})
         assert set(result) == {"phone_script"}
 
-    @patch("ai.message_generator._complete", return_value=_VALID_RESPONSE)
+    @patch("ai.message_generator._complete",
+           return_value=answer(Apertura="Buenos días.\\nHemos analizado su web."))
     def test_newline_escape_sequences_expanded(self, _):
-        assert "\n" in generate({"lead": "Test", "has_website": True})["phone_script"]
+        script = generate({"lead": "Test", "has_website": True})["phone_script"]
+        assert "Buenos días.\nHemos analizado su web." in script
 
     @patch("ai.message_generator._complete", return_value="esto no es json")
     def test_parse_failure_returns_an_empty_script(self, _):
@@ -138,35 +159,13 @@ class TestGenerate:
         # its parent search open over a pitch the agent can write himself.
         assert generate({"lead": "Negocio Test", "has_website": True}) == {"phone_script": ""}
 
-    @patch("ai.message_generator._complete",
-           return_value='{"phone_script": {"Apertura": "Buenos días", "Cierre": "Gracias"}}')
+    @patch("ai.message_generator._complete", return_value=_VALID_RESPONSE)
     def test_a_structured_script_is_flattened_to_text(self, _):
         script = generate({"lead": "Test", "has_website": True})["phone_script"]
-        assert "--- Apertura ---" in script and "Buenos días" in script
-
-    @patch("ai.message_generator._complete", return_value=(
-        '{"phone_script": {"Objeciones": {'
-        '"Objeción 1": "No estoy seguro", "Respuesta": "Le explico por qué", '
-        '"Objeción 2": "Ya tenemos web", "Respuesta": "Es genial que la tenga"}}}'
-    ))
-    def test_repeated_labels_keep_every_answer(self, _):
-        # Verbatim shape from a production lead: a dict kept only the last "Respuesta",
-        # losing the first answer and pairing the second with the wrong objection.
-        script = generate({"lead": "Test", "has_website": True})["phone_script"]
-        assert "· Objeción 1: No estoy seguro — Respuesta: Le explico por qué" in script
-        assert "· Objeción 2: Ya tenemos web — Respuesta: Es genial que la tenga" in script
-
-    @patch("ai.message_generator._complete", return_value=(
-        '{"phone_script": {"Objeciones": {'
-        '"Objeción 1": "No creo que sea tan grave", "Respuesta 1": "Es una obligación legal", '
-        '"Objeción 2": "Ya tengo quien la gestiona", "Respuesta 2": "Trabajamos con su equipo"}}}'
-    ))
-    def test_numbered_labels_are_paired(self, _):
-        # Verbatim shape from a production lead: no key repeats, so only ignoring the
-        # numbering shows these are labels taking turns.
-        script = generate({"lead": "Test", "has_website": True})["phone_script"]
-        assert "· Objeción 1: No creo que sea tan grave — Respuesta 1: Es una obligación legal" in script
-        assert "· Objeción 2: Ya tengo quien la gestiona — Respuesta 2: Trabajamos con su equipo" in script
+        assert "--- Apertura ---" in script
+        assert "Buenos días, le llamo de SegurSEO." in script
+        # Each objection on one line, both voices labelled as the panel splits them.
+        assert "· objeción: No estoy seguro — respuesta: Le explico por qué" in script
 
 
 # ── What the model is told about the card ─────────────────────────────────────
@@ -218,3 +217,187 @@ class TestResponseFormat:
         assert payload["response_format"]["json_schema"]["strict"] is True
         # Without it OpenRouter may route to a provider that ignores the schema silently.
         assert payload["provider"] == {"require_parameters": True}
+
+
+# ── Checking the answer against that shape ────────────────────────────────────
+
+# The two shapes that actually reached a lead, verbatim. Neither is a list of exchanges,
+# so both are now caught before the agent reads anything.
+_REPEATED_LABELS = ('{"phone_script": {"Objeciones": {'
+                    '"Objeción 1": "No estoy seguro", "Respuesta": "Le explico por qué", '
+                    '"Objeción 2": "Ya tenemos web", "Respuesta": "Es genial que la tenga"}}}')
+_NUMBERED_LABELS = ('{"phone_script": {"Objeciones": {'
+                    '"Objeción 1": "No creo que sea tan grave", '
+                    '"Respuesta 1": "Es una obligación legal", '
+                    '"Objeción 2": "Ya tengo quien la gestiona", '
+                    '"Respuesta 2": "Trabajamos con su equipo"}}}')
+
+
+class TestFormatErrors:
+    def test_the_shape_asked_for_passes(self):
+        assert _format_errors(_parse(_VALID_RESPONSE)) == []
+
+    def test_an_answer_that_is_not_json_says_only_that(self):
+        assert _format_errors(None) == ["La respuesta no es JSON válido."]
+
+    @pytest.mark.parametrize("answer, expected", [
+        ("no un objeto", "La respuesta no es un objeto."),
+        ({}, "Falta «phone_script»."),
+        ({"phone_script": "un texto"}, "«phone_script» no es un objeto."),
+    ])
+    def test_the_outer_shape(self, answer, expected):
+        assert _format_errors(answer) == [expected]
+
+    def test_a_missing_phase_is_named(self):
+        script = {phase: "texto" for phase in _PHASES if phase != "Propuesta"}
+        script["Objeciones"] = _PITCH["Objeciones"]
+        assert "Falta la fase «Propuesta»." in _format_errors({"phone_script": script})
+
+    def test_phases_that_were_not_asked_for_are_counted_not_named(self):
+        errors = _format_errors(json.loads(answer(Cierre="Gracias", Despedida="Adiós")))
+        assert errors == ["Hay 2 fases no pedidas."]
+
+    @pytest.mark.parametrize("value, expected", [
+        ("", "La fase «Propuesta» está vacía."),
+        ("   ", "La fase «Propuesta» está vacía."),
+        (42, "La fase «Propuesta» no es un texto."),
+    ])
+    def test_a_phase_has_to_be_text_with_something_in_it(self, value, expected):
+        assert _format_errors(json.loads(answer(Propuesta=value))) == [expected]
+
+    def test_objections_have_to_be_a_list_of_at_least_two(self):
+        assert _format_errors(json.loads(answer(Objeciones={}))) == ["«Objeciones» no es una lista."]
+        one = [{"objeción": "sola", "respuesta": "una"}]
+        assert ("«Objeciones» tiene 1 elemento; hacen falta al menos 2."
+                in _format_errors(json.loads(answer(Objeciones=one))))
+
+    @pytest.mark.parametrize("exchange, expected", [
+        ("un texto", "La objeción 1 no es un objeto."),
+        ({"respuesta": "sin objeción"}, "La objeción 1 no tiene «objeción»."),
+        ({"objeción": "sin respuesta"}, "La objeción 1 no tiene «respuesta»."),
+        ({"objeción": "", "respuesta": "vacía"}, "La objeción 1 está vacía."),
+        ({"objeción": "x", "respuesta": ""}, "La respuesta de la objeción 1 está vacía."),
+        ({"objeción": "x", "respuesta": 7}, "La respuesta de la objeción 1 no es un texto."),
+        ({"objeción": "x", "respuesta": "y", "nota": "z"},
+         "La objeción 1 tiene 1 campo no pedido."),
+    ])
+    def test_each_exchange_is_judged_by_its_position(self, exchange, expected):
+        errors = _format_errors(json.loads(answer(Objeciones=[exchange, exchange])))
+        assert expected in errors
+
+    @pytest.mark.parametrize("shape", [_REPEATED_LABELS, _NUMBERED_LABELS])
+    def test_the_shapes_that_reached_a_lead_are_caught(self, shape):
+        errors = _format_errors(_parse(shape))
+        # This is what _keep_repeated_keys buys now: it paired the labels into one line
+        # per exchange, so the check sees both of them and says neither is an object.
+        # Left to `dict`, the repeats would overwrite and half the entries would be gone
+        # before anything looked at them.
+        assert "La objeción 1 no es un objeto." in errors
+        assert "La objeción 2 no es un objeto." in errors
+        assert "Falta la fase «Apertura»." in errors
+
+    def test_the_errors_quote_nothing_the_model_wrote(self):
+        # The reason the API can keep these: they outlive the purge that empties the
+        # prompt and the answer, so a fragment of the model's text would be personal data
+        # in a column built to survive. Not even the name of a key it invented.
+        secret = "Panadería Zzyzx del Carmen"
+        reply = json.dumps({"phone_script": {
+            **_PITCH,
+            secret: "una fase que no pedimos",
+            "Propuesta": {"nota": secret},
+            "Objeciones": [{"objeción": "x", "respuesta": "", secret: secret},
+                           {"objeción": "y", "respuesta": "z"}],
+        }}, ensure_ascii=False)
+
+        errors = _format_errors(json.loads(reply))
+        assert len(errors) == 4
+        assert not any(secret in error for error in errors)
+
+
+# ── One corrective attempt, and only one ──────────────────────────────────────
+
+def _response(status: int = 200, content: str = "") -> MagicMock:
+    """Just enough of a chat-completion response for _complete to work on."""
+    response = MagicMock(status_code=status, headers={})
+    response.json.return_value = {"choices": [{"message": {"content": content}}]}
+    if status >= 400:
+        response.raise_for_status.side_effect = requests.HTTPError(response=response)
+    return response
+
+
+def _send(*answers: str) -> tuple[dict, list[dict]]:
+    """Drive generate() against these answers in order; return it and what was posted."""
+    with patch("ai.message_generator.requests.post",
+               side_effect=[_response(content=a) for a in answers]) as post:
+        result = generate({"lead": "Ejemplo SL", "has_website": True})
+    return result, [call.kwargs["json"] for call in post.call_args_list]
+
+
+class TestTheCorrectiveAttempt:
+    def test_an_answer_that_fits_is_asked_for_once(self):
+        result, sent = _send(_VALID_RESPONSE)
+        assert len(sent) == 1
+        assert "Buenos días, le llamo de SegurSEO." in result["phone_script"]
+
+    def test_an_answer_that_does_not_fit_is_sent_back_with_what_was_wrong(self):
+        rejected = answer(Propuesta="")
+        result, sent = _send(rejected, _VALID_RESPONSE)
+
+        assert len(sent) == 2
+        # A conversation, not a fresh ask: the model is shown its own answer and the
+        # problem with it, so the correction is of that answer rather than a second guess.
+        assert [message["role"] for message in sent[1]["messages"]] == [
+            "system", "user", "assistant", "user"]
+        assert sent[1]["messages"][1] == sent[0]["messages"][1]
+        assert sent[1]["messages"][2]["content"] == rejected
+        correction = sent[1]["messages"][3]["content"]
+        assert "La fase «Propuesta» está vacía." in correction
+        assert "Devuelve el JSON completo corregido" in correction
+        # And the corrected answer is what the agent gets.
+        assert "Lo dejamos resuelto en una semana." in result["phone_script"]
+
+    def test_an_answer_that_is_not_json_is_corrected_too(self):
+        result, sent = _send("esto no es json", _VALID_RESPONSE)
+        assert len(sent) == 2
+        assert "La respuesta no es JSON válido." in sent[1]["messages"][3]["content"]
+        assert "Buenos días, le llamo de SegurSEO." in result["phone_script"]
+
+    @pytest.mark.parametrize("shape", [_REPEATED_LABELS, _NUMBERED_LABELS])
+    def test_the_shapes_that_reached_a_lead_are_asked_again(self, shape):
+        result, sent = _send(shape, _VALID_RESPONSE)
+        assert len(sent) == 2
+        assert "Buenos días, le llamo de SegurSEO." in result["phone_script"]
+
+    def test_two_answers_that_do_not_fit_leave_no_pitch(self):
+        # The tokens were spent twice and the lead is still reported: it settles with no
+        # pitch rather than holding its parent search open, and the audit says why.
+        result, sent = _send(answer(Objeciones=[]), answer(Objeciones=[]))
+        assert len(sent) == 2
+        assert result == {"phone_script": ""}
+
+    def test_there_is_no_third_attempt(self):
+        # One correction, not a budget: an argumentario is worth a second try, and the
+        # agent can write the pitch himself.
+        with patch("ai.message_generator.requests.post",
+                   side_effect=[_response(content="no json"), _response(content="no json"),
+                                _response(content=_VALID_RESPONSE)]) as post:
+            assert generate({"lead": "Ejemplo SL", "has_website": True}) == {"phone_script": ""}
+        assert post.call_count == 2
+
+
+class TestAnHttpFailureIsNotAFormatProblem:
+    """A 402 or a timeout says nothing about the shape, and the worker reads them itself."""
+
+    def test_a_402_propagates_without_a_second_attempt(self):
+        with patch("ai.message_generator.requests.post", return_value=_response(status=402)) as post:
+            with pytest.raises(requests.HTTPError):
+                generate({"lead": "Ejemplo SL", "has_website": True})
+
+        assert post.call_count == 1
+
+    def test_a_timeout_propagates_without_a_second_attempt(self):
+        with patch("ai.message_generator.requests.post", side_effect=requests.Timeout) as post:
+            with pytest.raises(requests.Timeout):
+                generate({"lead": "Ejemplo SL", "has_website": True})
+
+        assert post.call_count == 1

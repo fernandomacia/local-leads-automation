@@ -418,6 +418,13 @@ def analyze_website(url: str) -> dict:
   tokens and settles the lead with an empty pitch, and nothing downstream can tell that
   from a model that was never reached. `final_status` says what the call did; `parsed_ok`
   says what its answer was worth.
+- **`format_errors` is metadata, so it must never quote the model.** The reasons an answer
+  could not be used survive the purge that empties the prompt and the answer they describe,
+  which is the point of them: "what was wrong with this one" stays answerable when the text
+  is gone. So a message names the phase, the position or the type and nothing else — not a
+  value, not even the name of a key the model invented, which would be personal data in a
+  column built to survive. A test feeds a recognisable string into both a key and a value
+  and fails if any message carries it.
 - **`system_prompt_sha256` outlives the prompt it hashes**, which is why it is there: the
   text is content and is cleared after 90 days, so the hash is what still answers which
   version of the prompt produced a given pitch.
@@ -499,6 +506,23 @@ def analyze_website(url: str) -> dict:
   agent was not using
 - Contact is semi-manual (not mass automated) to comply with GDPR
 - The argumentario is a draft to read and adapt, never a script to recite
+- **The schema is a request, not a guarantee, so the answer is checked as well.**
+  `_RESPONSE_FORMAT` is built from `_PHASES` and OpenRouter is asked to route only to
+  providers that enforce it, but one that quietly does not would return a shape nobody
+  looked at — which is how two argumentarios reached a lead with a label printed where the
+  customer's words belong. `_format_errors` reads every answer against that same list, and
+  a test holds the prompt's own example to it: one contract described three times, which
+  must not drift apart.
+- **An answer that does not fit is corrected once, never twice.** The model is shown its own
+  answer and what was wrong with it, as a conversation rather than a fresh ask. If the
+  second one does not fit either, the lead is reported with no pitch: an argumentario is
+  worth a second try and not a budget, and the agent can write it himself. The HTTP retries
+  in `_complete` are a separate matter — a 402 or a timeout propagates and is never a
+  format problem.
+- **`_keep_repeated_keys` is now there for the check, not for the agent.** A labelled
+  Objeciones never reaches a call any more, because it fails the format check. What the hook
+  still buys is that the check sees every entry: left to `dict`, four labelled lines arrive
+  as two and a count of objections would be counting what Python kept.
 
 ---
 

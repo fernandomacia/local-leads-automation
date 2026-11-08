@@ -11,7 +11,30 @@ worker requirements to.
 > phases in `CLAUDE.md`. Rebuilding those entries from them now would read tidier than the
 > history actually was, which is the one thing a changelog cannot afford.
 
-## [Unreleased]
+## [2.11.0] - 2026-11-08
+
+### Added
+
+- **An answer from the model is checked against the shape asked for, and corrected once if
+  it does not fit.** The schema is a request, not a guarantee: a provider that quietly does
+  not enforce one would send a shape nobody checked, which is how two argumentarios reached
+  a lead with a label printed where the customer's words belong. Now every answer is read
+  against the five phases and the list of exchanges, and one that does not fit goes back to
+  the model as a conversation — its own answer, and what was wrong with it — asking for the
+  complete JSON again. One correction, not a loop: if the second answer does not fit either,
+  the lead is reported with no pitch, which the agent can write himself.
+- **The reasons live in the audit, as `audit_llm_calls.format_errors`.** Each attempt is its
+  own call there, with its own reasons, so a lead that needed correcting is told apart from
+  one that answered properly the first time. The messages name the phase, the position or
+  the type — «Falta la fase «Propuesta».», «La objeción 2 no tiene «respuesta».» — and never
+  quote the model, not even the name of a key it invented. That is what lets the API keep
+  them: they outlive the 90-day purge of the prompt and the answer they describe, and a
+  fragment of the model's text would be personal data in a column built to survive.
+
+  **Requires SegurSEO-API 13.5.0 or newer.** An older one rejects a fragment carrying a
+  column it does not know, and a rejection is an answer, so that fragment is dropped rather
+  than kept for later — taking `parsed_ok` and `response_parsed` with it, since all three
+  travel together.
 
 ### Changed
 
