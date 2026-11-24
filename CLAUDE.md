@@ -567,6 +567,34 @@ When asked for commits, **NEVER execute commits automatically**. Instead:
    - Present the commit (message + file list, ready to copy-paste)
    - Wait for confirmation before moving to the next commit
 
+### Commits That Span Several Repositories
+
+SegurSEO is four repositories, and one Claude session often changes files in more than one:
+
+| Repository | Path | Its rules |
+|---|---|---|
+| Platform | `~/Devs/SegurSEO-Platform` | its `CLAUDE.md` |
+| API | `~/Devs/SegurSEO-API` | its `CLAUDE.md` |
+| Theme | `~/Devs/SegurSEO/wp-content/themes/SegurSEO` | its `CLAUDE.md` |
+| Worker | `~/Devs/local-leads-automation` | its `CLAUDE.md` |
+
+When asked for the commits and this session has changed files in another of them, the commits of
+**every** repository it touched are presented, not only this one's:
+
+- **Each repository's commits follow that repository's `CLAUDE.md`, read before writing them** —
+  never this file's rules applied to another repo. They differ where it matters: where the
+  version lives and how it is bumped (`package.json` via `npm version`, `composer.json` plus the
+  lock hash, `style.css`), whether `CLAUDE.md` travels inside the `feat:`/`fix:` or in a `docs:`
+  commit, the scopes, the changelog's language and format, the README and Compatibility table
+  updates. A commit presented for a repository has respected that repository's contract
+- **Grouped by repository**, each headed by its name and path, every commit with its message and
+  file list ready to copy-paste, the paths relative to that repository's root
+- **Ordered by deploy order** — usually the API first when the others start using something new —
+  and the order is stated with its reason
+- **Only what this session changed**: check `git status` in each repository, and leave alone
+  changes the session did not make
+- One commit at a time and waiting for confirmation still applies, across repositories too
+
 ---
 
 ## Releases and tagging
