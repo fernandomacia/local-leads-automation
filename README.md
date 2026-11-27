@@ -13,6 +13,7 @@ SegurSEO Platform (Angular) → SegurSEO-API (Laravel) queues the work
   → claim a search and scrape Google Maps (name, website, phone, address, city, province)
   → report each batch, with what the Maps card was missing
   → claim a lead and analyse its site (CMS, email, socials, SEO score, legal compliance)
+    (a lead added by hand first gets its Google Maps card looked up from its website)
   → generate the phone argumentario (OpenRouter LLM)
   → report the analysis back
   → assisted manual outreach, from the panel
@@ -289,7 +290,18 @@ other.
 | `no_website` | The Maps listing has no website |
 | `no_phone` | The Maps listing has no phone number |
 | `no_address` | The Maps listing has no street address |
+| `no_maps_card` | Only for a lead added by hand: the worker looked its card up from its website and found none it could tie to the site — "No tiene ficha en Google Maps". Never reported for a search's leads, which come from their card |
 | `social_as_website` | The listing's website button points at a social profile instead of at a site of the business's own. Its label names the network — "La ficha de Google Maps enlaza a LinkedIn en lugar de a su web" — and it **replaces `no_website`, never joins it**: the button is there and the destination is wrong, so the business may have a website all the same |
+
+### Finding the card of a lead added by hand
+
+A company added in the panel by its web address arrives with a website and no card. When
+`GET /leads/next` says `find_maps_card`, the worker reads the site's home page for its
+name, phones and town, searches Maps by the domain and then by name and town, and opens up
+to three results of each search. **A card is accepted only if its website button leads to
+the same domain or it lists one of the site's phones** — a namesake elsewhere is refused.
+The card, or `no_maps_card`, is reported through `PATCH /leads/{id}/maps-card` before the
+site is analysed; the API fills only the fields the lead had empty.
 
 ---
 
@@ -301,6 +313,7 @@ scraper/
   maps_scraper.py            # Scrapes businesses from Google Maps
   web_analyzer.py            # CMS detection, contacts, SEO scoring
   card_issues.py             # What a Maps card is missing (pure, no browser)
+  card_lookup.py             # Finding a card from a website: what to search, what to accept
   domains.py                 # normalize_domain(): the hostname the API stores
   social.py                  # identify_platform(): which network a URL belongs to
   net_guard.py               # SSRF guard shared by every fetch and the browser
@@ -341,6 +354,8 @@ combinations are recorded — the Compatibility table in `SegurSEO-API/README.md
   against an older API rather than the run failing, as 2.9.0 does against 13.2.x. Either way
   those API releases accepted the older input too, so the gap stays short and one-sided in
   that direction only.
+- **2.12.0 looks cards up only against API 14.2.0 or newer**, which sends `find_maps_card`
+  and accepts `PATCH /leads/{id}/maps-card`; against an older one nothing is looked up.
 - **2.11.0 needs API 13.5.0 or newer**, which is where `audit_llm_calls.format_errors`
   exists; 2.10.0 needed 13.4.0, where the fragments endpoint itself appeared. Both degrade
   rather than failing — the audit never blocks a run — but they degrade differently: a

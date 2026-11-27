@@ -25,6 +25,7 @@ scraper/
                               # scrape_incrementally(): one card at a time, for worker.py
   web_analyzer.py            # CMS detection, email/socials extraction, SEO scoring, is_contactable()
   card_issues.py             # maps_card_issues(): what a Maps card is missing (pure, no browser)
+  card_lookup.py             # A card from a website: site identity, queries, card_matches() (pure)
   domains.py                 # normalize_domain(): the hostname the API stores, a port of Domain
   social.py                  # identify_platform(): which network a URL belongs to
   net_guard.py               # SSRF guard shared by the HTTP fetches and the browser fallback
@@ -164,6 +165,20 @@ def analyze_website(url: str) -> dict:
   consecutive scroll waves with no new hrefs at all (end of feed), so an
   exhausted search doesn't scroll forever. Known (skipped) leads reset the
   counter — only a truly empty scroll wave counts as idle.
+
+- **A lead added by hand has its card looked up from its website** (`find_maps_card` on
+  the job, API >= 14.2.0). `site_identity()` reads the home page's name, phones and town,
+  `find_maps_card()` searches Maps by the domain and then by name and town, opening at most
+  `_LOOKUP_CANDIDATES` results per search. **A card is accepted only by evidence**: the same
+  domain behind its website button, or one of the site's phones (`card_matches()`). A
+  search by name returns Google's closest guess, and a wrong card would put somebody
+  else's gaps into the pitch. The domain query often lands straight on the card rather than
+  a list, which `_lookup_query` reads in place. Tried on godela.es and segurseo.com: both
+  found by the domain alone
+- The card is reported at once through `report_maps_card()`, before the analysis, and
+  none is the `no_maps_card` finding — never `{}`, which would claim a complete card. A
+  lookup that raises leaves the card unread (NULL) and the site is analysed anyway: the
+  lookup must never cost the lead
 
 ### Job order
 

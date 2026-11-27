@@ -65,6 +65,7 @@ def _request(method: str, path: str, *, json=None, error=requests.HTTPError) -> 
       the first answer was lost inserts each lead once.
     - `complete`, `fail`, `release` and `payment-error` all set a state rather than
       incrementing anything, and `report_analysis` writes the same fields again.
+    - `report_maps_card` is read once by the API: a repeat finds the card already recorded.
     - `domains/check` only reads.
     - A claim is the one exception worth naming: if the first request did claim a job and
       the answer was lost, the retry claims a different one and the first sits until
@@ -167,3 +168,8 @@ def report_analysis(lead_id: str, analysis: dict) -> None:
     analysed is what stops it doing that again.
     """
     _request("PATCH", f"/api/scraper/leads/{lead_id}/analysis", json=analysis, error=ReportRejected)
+
+
+def report_maps_card(lead_id: str, card: dict) -> None:
+    """Submit the Google Maps card found for a lead added by hand, or that it has none."""
+    _request("PATCH", f"/api/scraper/leads/{lead_id}/maps-card", json=card, error=ReportRejected)

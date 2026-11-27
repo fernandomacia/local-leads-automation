@@ -29,6 +29,7 @@ from config import (
     MAX_EXTRACTION_RETRIES,
     MAX_IDLE_SCROLLS,
 )
+from scraper.card_lookup import card_matches, search_queries
 from scraper.domains import normalize_domain
 from scraper.social import identify_platform
 
@@ -70,7 +71,7 @@ def _start_search(p, profession: str, city: str, headless: bool) -> tuple[Browse
     a fresh ``browser.new_page()`` would start its own isolated session and
     hit the consent screen again.
     """
-    search_url = f"https://www.google.com/maps/search/{quote_plus(f'{profession} {city}')}"
+    search_url = _search_url(f"{profession} {city}")
 
     browser = p.chromium.launch(headless=headless)
     context = browser.new_context()
@@ -333,5 +334,63 @@ def scrape_incrementally(
                     break
 
                 _scroll_feed(list_page)
+        finally:
+            browser.close()
+
+
+# Cards opened per query when Maps answers with a list: the right one, when it exists, is
+# almost always among the first, and each extra card is one more page load Google sees.
+_LOOKUP_CANDIDATES = 3
+
+
+def _search_url(query: str) -> str:
+    return f"https://www.google.com/maps/search/{quote_plus(query)}"
+
+
+def _lookup_query(context: BrowserContext, page: Page, query: str, website: str, phones: list[str]) -> dict | None:
+    """Search Maps for one query and return the first card that belongs to the website."""
+    page.goto(_search_url(query))
+    time.sleep(_get_delay(DELAY_INITIAL_LOAD))
+    _handle_consent(page)
+    try:
+        page.wait_for_selector(f"{SELECTOR_NAME}, {SELECTOR_RESULTS}", timeout=15000)
+    except PlaywrightTimeoutError:
+        return None  # Nothing found for this query
+
+    # A query precise enough lands straight on the card instead of a list.
+    if page.locator(SELECTOR_NAME).count() > 0 and page.locator(SELECTOR_RESULTS).count() == 0:
+        card = _extract_business(page)
+        card["maps_url"] = page.url
+        return card if card_matches(card, website, phones) else None
+
+    for href in _visible_listing_hrefs(page)[:_LOOKUP_CANDIDATES]:
+        detail_page = context.new_page()
+        card = _extract_with_retries(detail_page, href)
+        detail_page.close()
+        if card and card_matches(card, website, phones):
+            return card
+    return None
+
+
+def find_maps_card(website: str, identity: dict, headless: bool = True) -> dict | None:
+    """Find the Google Maps card of the business behind a website, or None if it has none.
+
+    Searches by domain first, then by the name and town the site gives, and accepts a card
+    only when it links to the same domain or lists one of the site's phones — see
+    ``card_lookup``. ``None`` is an answer: no card that can be tied to this site exists.
+
+    Returns:
+        The card in ``_extract_business``'s shape plus ``maps_url``, or None.
+    """
+    phones = identity.get("phones") or []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        try:
+            context = browser.new_context()
+            page = context.new_page()
+            for query in search_queries(website, identity):
+                if card := _lookup_query(context, page, query, website, phones):
+                    return card
+            return None
         finally:
             browser.close()

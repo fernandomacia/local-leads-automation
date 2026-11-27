@@ -1211,3 +1211,74 @@ class TestTheRunItself:
         })
 
         audit.pause.assert_called_once_with(kind, seconds)
+
+
+# ── Maps card lookup for leads added by hand ─────────────────────────────────
+
+_MANUAL_JOB = {"id": "m1", "business_name": "godela.es", "website": "https://godela.es",
+               "phone": None, "city": None, "profession": "", "find_maps_card": True,
+               "maps_issues": None}
+
+_CARD = {"lead": "Ajuntament de Godella", "website": "https://godela.es", "social_networks": {},
+         "phone": "963638056", "address": "Plaça del Poble, 1", "zip_code": "46110",
+         "city": "Godella", "province": "Valencia", "maps_url": "https://www.google.com/maps/place/x"}
+
+
+class TestMapCardToApiShape:
+    def test_a_card_found_carries_its_data_and_its_gaps(self):
+        payload = worker.map_card_to_api_shape(_CARD)
+        assert payload["found"] is True
+        assert payload["maps_url"] == _CARD["maps_url"]
+        assert payload["business_name"] == "Ajuntament de Godella"
+        assert payload["maps_issues"] == {}
+
+    def test_no_card_is_a_finding_not_an_empty_answer(self):
+        assert worker.map_card_to_api_shape(None) == {
+            "found": False, "maps_issues": {"no_maps_card": "No tiene ficha en Google Maps"},
+        }
+
+
+class TestCardLookupInTheAnalysis:
+    def _run(self, job: dict, card=None, lookup_error=None):
+        with patch("worker.site_identity", return_value={"name": "", "phones": [], "city": ""}), \
+             patch("worker.find_maps_card", return_value=card, side_effect=lookup_error) as find, \
+             patch("worker.report_maps_card") as report_card, \
+             patch("worker.analyze", side_effect=lambda lead: {**lead, "cms": "wordpress", "seo_score": 50}) as analyze, \
+             patch("worker.generate", return_value={"phone_script": "Argumentario"}) as generate, \
+             patch("worker.report_analysis"):
+            analysed = run_analysis_job(dict(job))
+        return SimpleNamespace(analysed=analysed, find=find, report_card=report_card,
+                               analyze=analyze, generate=generate)
+
+    def test_looks_the_card_up_and_reports_it_before_analysing(self):
+        run = self._run(_MANUAL_JOB, card=_CARD)
+
+        run.report_card.assert_called_once()
+        lead_id, payload = run.report_card.call_args.args
+        assert lead_id == "m1" and payload["found"] is True
+        assert run.analysed is True
+
+    def test_what_the_card_adds_reaches_the_pitch(self):
+        run = self._run(_MANUAL_JOB, card={**_CARD, "address": ""})
+
+        context = run.generate.call_args.args[0]
+        assert context["city"] == "Godella"
+        assert context["maps_issues"] == {"no_address": "Sin dirección en Google Maps"}
+
+    def test_no_card_reaches_the_pitch_as_its_finding(self):
+        run = self._run(_MANUAL_JOB, card=None)
+
+        assert run.report_card.call_args.args[1]["found"] is False
+        assert run.generate.call_args.args[0]["maps_issues"] == {"no_maps_card": "No tiene ficha en Google Maps"}
+
+    def test_a_broken_lookup_still_analyses_the_site(self):
+        run = self._run(_MANUAL_JOB, lookup_error=RuntimeError("selector changed"))
+
+        run.report_card.assert_not_called()
+        assert run.analysed is True
+
+    def test_a_search_lead_is_never_looked_up(self):
+        run = self._run(_JOB)
+
+        run.find.assert_not_called()
+        run.report_card.assert_not_called()

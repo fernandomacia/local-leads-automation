@@ -11,6 +11,28 @@ worker requirements to.
 > phases in `CLAUDE.md`. Rebuilding those entries from them now would read tidier than the
 > history actually was, which is the one thing a changelog cannot afford.
 
+## [2.12.0] - 2026-11-27
+
+### Added
+
+- **A lead added by hand gets its Google Maps card looked up from its website.** The panel
+  can now add a company by its web address alone, which reaches this worker with a website
+  and no card — the reverse of a search's leads. When the job says `find_maps_card`, the
+  worker reads the site's home page for its name, phones and town, searches Maps by the
+  domain and then by name and town, and opens the first three results of each search.
+- **A card is accepted only if it belongs to that site**: its website button leads to the
+  same domain, or it lists one of the site's phones. A search by name returns whatever
+  Google thinks is closest — a namesake in another province, a competitor — and a wrong card
+  is worse than none, because the pitch would name the gaps in somebody else's listing.
+- **The card is reported at once, through `PATCH /leads/{id}/maps-card`**, before the site
+  is analysed: a reading is sent where it is taken. What it adds — phone, town, its gaps —
+  also reaches that lead's pitch. A business with no card that can be tied to its site gets
+  the finding `no_maps_card` («No tiene ficha en Google Maps»). A lookup that breaks leaves
+  the card unread and the site is analysed anyway.
+
+  **Requires SegurSEO-API 14.2.0 or newer** to do anything: an older API never sends
+  `find_maps_card`, so nothing is looked up and every lead is analysed as before.
+
 ## [2.11.0] - 2026-11-08
 
 ### Added

@@ -16,6 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from config import COMPLIANCE_RENDER_FALLBACK, COMPLIANCE_TIMEOUT, SOCIAL_DOMAINS
+from scraper.card_lookup import identity_from_soup
 from scraper.compliance import detect_compliance
 from scraper.net_guard import host_ok
 from scraper.social import identify_platform
@@ -362,6 +363,16 @@ def is_contactable(lead: dict) -> bool:
     lead record (e.g. the worker's job dict) should check it separately.
     """
     return any(lead.get(f, "").strip() for f in _CONTACT_FIELDS)
+
+
+def site_identity(url: str) -> dict:
+    """Read who a website says it is, to look its Google Maps card up — see ``card_lookup``.
+
+    One request to the home page; an unreachable site answers with nothing to search by
+    but its domain.
+    """
+    result = _fetch(url) if url else None
+    return identity_from_soup(result[1]) if result else {"name": "", "phones": [], "city": ""}
 
 
 def analyze(lead: dict) -> dict:

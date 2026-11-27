@@ -21,9 +21,9 @@ import requests
 
 from config import (API_BASE_URL, API_TOKEN, APP_VERSION, BATCH_SIZE, HEADLESS, POLL_INTERVAL,
                     SOCIAL_DOMAINS)
-from scraper.card_issues import maps_card_issues
-from scraper.maps_scraper import scrape_incrementally
-from scraper.web_analyzer import analyze
+from scraper.card_issues import NO_MAPS_CARD_ISSUES, maps_card_issues
+from scraper.maps_scraper import find_maps_card, scrape_incrementally
+from scraper.web_analyzer import analyze, site_identity
 from ai.message_generator import generate
 from api.client import (
     ReportRejected,
@@ -37,6 +37,7 @@ from api.client import (
     claim_next_analysis_job,
     report_payment_error,
     report_analysis,
+    report_maps_card,
 )
 from audit import recorder
 
@@ -279,6 +280,43 @@ def map_to_api_shape(lead: dict) -> dict:
     payload["maps_issues"] = maps_card_issues(lead)
 
     return payload
+
+
+def map_card_to_api_shape(card: dict | None) -> dict:
+    """Map the card a lookup found — or ``None``, none — to the maps-card PATCH shape.
+
+    ``maps_issues`` is always sent, as at the ingest: ``{}`` says the card was complete, and
+    a card that does not exist is the ``no_maps_card`` finding, never an empty answer.
+    """
+    if card is None:
+        return {"found": False, "maps_issues": dict(NO_MAPS_CARD_ISSUES)}
+
+    payload = map_to_api_shape(card)
+    payload["found"] = True
+    return payload
+
+
+def _look_up_card(job: dict) -> dict:
+    """Find and report the Maps card of a lead added by hand; return the job as the pitch sees it.
+
+    Such a lead came from its website, so its card is looked up before the analysis and
+    reported at once — a reading is sent where it is taken. What the card adds (phone, town,
+    its gaps) also feeds this lead's pitch, without overriding what the job already carries.
+
+    A lookup that breaks leaves the card unread rather than failing the lead: the website is
+    still worth analysing, and NULL keeps saying nobody knows whether a card exists.
+    """
+    try:
+        card = find_maps_card(job["website"], site_identity(job["website"]), headless=HEADLESS)
+        payload = map_card_to_api_shape(card)
+        report_maps_card(job["id"], payload)
+    except Exception:
+        logger.warning("Could not look up the Maps card of lead %s; analysing without it",
+                       job["id"], exc_info=True)
+        return job
+
+    filled = {k: payload[k] for k in ("phone", "address", "city") if payload.get(k) and not job.get(k)}
+    return {**job, **filled, "maps_url": payload.get("maps_url"), "maps_issues": payload["maps_issues"]}
 
 
 def map_analysis_to_api_shape(analysis: dict, message: dict) -> dict:
@@ -536,6 +574,8 @@ def run_analysis_job(job: dict, idx: int = 0, total: int = 0) -> bool:
     # the API would not take is the one thing worth having afterwards.
     outcome, error, sent = "failed", None, None
     try:
+        if job.get("find_maps_card"):
+            job = _look_up_card(job)
         # profession drives the legal-notice checks that only apply to regulated
         # professions (bar association and membership number, LSSI art. 10.1.c).
         analysis = analyze({

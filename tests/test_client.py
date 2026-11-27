@@ -124,3 +124,13 @@ class TestRetries:
                 client.report_analysis("l1", {})
 
         request.assert_called_once()
+
+
+class TestReportMapsCard:
+    def test_patches_the_lead_and_names_a_refusal(self):
+        with patch.object(client._SESSION, "request", return_value=_response(422, "{}")) as request:
+            with pytest.raises(ReportRejected):
+                client.report_maps_card("l1", {"found": False, "maps_issues": {}})
+
+        method, url = request.call_args.args[:2]
+        assert method == "PATCH" and url.endswith("/api/scraper/leads/l1/maps-card")

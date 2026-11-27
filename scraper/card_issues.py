@@ -31,6 +31,14 @@ SOCIAL_AS_WEBSITE = "social_as_website"
 _SOCIAL_AS_WEBSITE_LABEL = "La ficha de Google Maps enlaza a {network} en lugar de a su web"
 
 
+# A business with no card at all, which only a lookup from its website can say: a search's
+# leads come from their card. The strongest Maps line there is — nobody searching Google
+# for the trade in that town ever sees the business — so it is a finding of its own,
+# never the three "missing field" ones it would otherwise be read as.
+NO_MAPS_CARD = "no_maps_card"
+NO_MAPS_CARD_ISSUES: dict[str, str] = {NO_MAPS_CARD: "No tiene ficha en Google Maps"}
+
+
 def _card_platform(lead: dict) -> str | None:
     """Return the network the card's website button pointed at, if it pointed at one."""
     return next(iter(lead.get("social_networks") or {}), None)
